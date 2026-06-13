@@ -1,0 +1,4112 @@
+server/index.js
+---
+import pkg from "pg";
+import express from "express";
+import cors from "cors";
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+import dotenv from "dotenv";
+
+const { Pool } = pkg;
+
+// Configuration
+dotenv.config();
+
+const app = express();
+const port = process.env.PORT || 5000;
+
+// Database connection
+const pool = new Pool({
+  user: process.env.DB_USER || "postgres",
+  password: process.env.DB_PASSWORD || "7284",
+  host: process.env.DB_HOST || "localhost",
+  port: parseInt(process.env.DB_PORT || "5432"),
+  database: process.env.DB_NAME || "Vipnet_fiche",
+});
+
+// Middleware
+app.use(
+  cors({
+    origin: [
+      "http://localhost",
+      "http://localhost:5173",
+      "http://197.159.195.207",
+      "http://197.159.195.207:5173",
+    ],
+    methods: "GET,POST,PUT,DELETE",
+    credentials: true,
+  })
+);
+//app.use(cors({ origin: "http://197.159.195.207" }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Authentication middleware
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ message: "Token manquant" });
+  }
+
+  jwt.verify(
+    token,
+    process.env.JWT_SECRET || "vipnet-fdp-secret-key",
+    (err, user) => {
+      if (err) {
+        return res.status(403).json({ message: "Token invalide" });
+      }
+      req.user = user;
+      next();
+    }
+  );
+};
+
+// Admin routes
+app.get("/api/users", authenticateToken, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res
+      .status(403)
+      .json({ message: "Accès réservé aux administrateurs" });
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT id, username, email, role, full_name FROM users ORDER BY username"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur récupération utilisateurs:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+// Modifiez la route de réinitialisation pour accepter un nouveau mot de passe
+app.post(
+  "/api/users/:id/reset-password",
+  authenticateToken,
+  async (req, res) => {
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ message: "Accès réservé aux administrateurs" });
+    }
+
+    const { id } = req.params;
+    const { newPassword } = req.body; // Récupérer le nouveau mot de passe du corps de la requête
+
+    if (!newPassword) {
+      return res
+        .status(400)
+        .json({ message: "Le nouveau mot de passe est requis" });
+    }
+
+    try {
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+      const result = await pool.query(
+        "UPDATE users SET password = $1 WHERE id = $2 RETURNING id, username, email",
+        [hashedPassword, id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ message: "Utilisateur non trouvé" });
+      }
+
+      res.json({
+        success: true,
+        message: "Mot de passe modifié avec succès",
+      });
+    } catch (err) {
+      console.error("Erreur modification mot de passe:", err);
+      res.status(500).json({ message: "Erreur serveur" });
+    }
+  }
+);
+
+// Mettre à jour un utilisateur
+app.put("/api/users/:id", authenticateToken, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ message: "Accès non autorisé" });
+  }
+
+  const { id } = req.params;
+  const { role } = req.body;
+
+  try {
+    const result = await pool.query(
+      "UPDATE users SET role = $1 WHERE id = $2 RETURNING id, username, role",
+      [role, id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Erreur mise à jour utilisateur:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.post("/api/register", async (req, res) => {
+  const {
+    username,
+    password,
+    email,
+    full_name,
+    role,
+    position,
+    department,
+    phone_number,
+  } = req.body;
+
+  // Validation des champs obligatoires
+  const requiredFields = [
+    "username",
+    "password",
+    "email",
+    "full_name",
+    "role",
+    "position",
+    "department",
+  ];
+  const missingFields = requiredFields.filter((field) => !req.body[field]);
+
+  if (missingFields.length > 0) {
+    return res.status(400).json({
+      error: "Champs obligatoires manquants",
+      missingFields,
+    });
+  }
+
+  try {
+    // Vérification de l'unicité
+    const userCheck = await pool.query(
+      "SELECT * FROM users WHERE username = $1 OR email = $2",
+      [username, email]
+    );
+
+    if (userCheck.rows.length > 0) {
+      return res.status(409).json({
+        error: "Utilisateur existe déjà",
+        conflict: {
+          username: userCheck.rows[0].username === username,
+          email: userCheck.rows[0].email === email,
+        },
+      });
+    }
+
+    // Hash du mot de passe
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Insertion dans la base de données
+    const newUser = await pool.query(
+      `INSERT INTO users (
+        username, password, email, full_name,
+        role, position, department, phone_number
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id, username, email, role, position, department`,
+      [
+        username,
+        hashedPassword,
+        email,
+        full_name,
+        role,
+        position,
+        department,
+        phone_number || null,
+      ]
+    );
+
+    res.status(201).json({
+      success: true,
+      user: newUser.rows[0],
+      message: "Compte créé avec succès",
+    });
+  } catch (error) {
+    console.error("Erreur inscription:", error);
+    res.status(500).json({
+      error: "Erreur serveur",
+      details: error.message,
+    });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    const result = await pool.query("SELECT * FROM users WHERE username = $1", [
+      username,
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ message: "Identifiants invalides" });
+    }
+
+    const user = result.rows[0];
+    const validPassword = await bcrypt.compare(password, user.password);
+
+    if (!validPassword) {
+      return res.status(401).json({ message: "Identifiants invalides" });
+    }
+
+    // Création du token JWT avec les informations essentielles
+    const token = jwt.sign(
+      {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        fullName: user.full_name,
+      },
+      process.env.JWT_SECRET || "vipnet-fdp-secret-key",
+      { expiresIn: "24h" }
+    );
+
+    // Réponse avec TOUTES les données nécessaires
+    res.json({
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      fullName: user.full_name,
+      position: user.position,
+      department: user.department,
+      phoneNumber: user.phone_number,
+      token, // Le token JWT
+    });
+  } catch (err) {
+    console.error("Erreur lors de la connexion:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+// Modifier la route POST /api/fdp
+app.post("/api/fdp", authenticateToken, async (req, res) => {
+  const {
+    creation_date,
+    description,
+    amount,
+    payment_method,
+    payment_reference,
+    department_source,
+    department_destination,
+    requester_signature,
+    requester_signature_date,
+    type_description,
+  } = req.body;
+
+  try {
+    // Conversion de la date en objet Date
+    const creationDateObj = new Date(creation_date);
+    if (isNaN(creationDateObj.getTime())) {
+      return res.status(400).json({ message: "Date de création invalide" });
+    }
+
+    // Étape 1 : Création avec référence temporaire
+    const tempReference = `TEMP-${creationDateObj.toLocaleDateString("fr-FR")}-F`;
+    const createResult = await pool.query(
+      `INSERT INTO fdps (
+        reference,
+        creation_date,
+        requester_id,
+        description,
+        amount,
+        payment_method,
+        payment_reference,
+        department_source,
+        department_destination,
+        status,
+        requester_signature,
+        requester_signature_date,
+        type_description
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+      [
+        tempReference,
+        creationDateObj,
+        req.user.id,
+        description,
+        amount,
+        payment_method,
+        payment_reference,
+        department_source,
+        department_destination,
+        "pending_superieur_hierarchique",
+        requester_signature,
+        requester_signature_date,
+        type_description,
+      ]
+    );
+
+    // Étape 2 : Générer la référence finale
+    const newId = createResult.rows[0].id;
+    const finalReference = `${newId} - ${creationDateObj.toLocaleDateString("fr-FR")} - F`;
+
+    // Étape 3 : Mise à jour de la référence
+    await pool.query(`UPDATE fdps SET reference = $1 WHERE id = $2`, [
+      finalReference,
+      newId,
+    ]);
+
+    // Étape 4 : Récupération de la FDP finale
+    const finalResult = await pool.query("SELECT * FROM fdps WHERE id = $1", [
+      newId,
+    ]);
+
+    // Ajout des infos du demandeur
+    const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [
+      req.user.id,
+    ]);
+    const fdp = finalResult.rows[0];
+    fdp.requesterName = userResult.rows[0].full_name;
+    fdp.requesterPosition = userResult.rows[0].position;
+    fdp.requesterDepartment = userResult.rows[0].department;
+    fdp.requesterPhone = userResult.rows[0].phone_number;
+    fdp.requesterEmail = userResult.rows[0].email;
+
+    res.json(fdp);
+  } catch (err) {
+    console.error("Erreur lors de la création de la FDP:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.get("/api/fdp/mine", authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT f.*, 
+        u.full_name as requester_name,
+        u.position as requester_position,
+        u.department as requester_department,
+        u.phone_number as requester_phone,
+        u.email as requester_email
+      FROM fdps f
+      LEFT JOIN users u ON f.requester_id = u.id
+      WHERE f.requester_id = $1
+      ORDER BY f.creation_date DESC
+    `,
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur lors de la récupération des FDPs:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.get("/api/fdp/pending/:role", authenticateToken, async (req, res) => {
+  const { role } = req.params;
+  const statusMap = {
+    operations: "pending_operations",
+    //fournisseur: "pending_fournisseur",
+    superieur_hierarchique: "pending_superieur_hierarchique",
+    tresorerie: "pending_tresorerie",
+    comptabilite: "pending_comptabilite",
+    directeur_general: "pending_directeur_general",
+    caisse: "pending_caisse",
+  };
+
+  try {
+    let query = `
+      SELECT f.*, 
+        u.full_name as requester_name,
+        u.position as requester_position,
+        u.department as requester_department,
+        u.phone_number as requester_phone,
+        u.email as requester_email
+      FROM fdps f
+      LEFT JOIN users u ON f.requester_id = u.id
+      WHERE f.status NOT IN ('completed', 'rejected')
+    `;
+
+    // Logique spéciale pour le DG
+    if (role === "directeur_general") {
+      query += ` AND f.directeur_general_signature IS NULL`;
+    } else {
+      query += ` AND f.status = $1`;
+    }
+
+    query += ` ORDER BY f.creation_date DESC`;
+
+    const result = await pool.query(
+      query,
+      role === "directeur_general" ? [] : [statusMap[role]]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur lors de la récupération des FDPs:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+app.get("/api/fdp", authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT f.*, 
+        u.full_name as requester_name,
+        u.position as requester_position,
+        u.department as requester_department,
+        u.phone_number as requester_phone,
+        u.email as requester_email,
+        CASE 
+          WHEN f.reference LIKE 'TEMP-%' THEN 'En attente de finalisation'
+          ELSE f.reference 
+        END as formatted_reference
+      FROM fdps f
+      LEFT JOIN users u ON f.requester_id = u.id
+      ORDER BY f.creation_date DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur lors de la récupération des FDPs:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+// Ajoutez la route GET /api/fdp/:id ici
+app.get("/api/fdp/:id", authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT f.*, 
+        u.full_name as requester_name,
+        u.position as requester_position,
+        u.department as requester_department,
+        u.phone_number as requester_phone,
+        u.email as requester_email,
+        CASE 
+          WHEN f.reference LIKE 'TEMP-%' THEN 'En attente de finalisation'
+          ELSE f.reference 
+        END as formatted_reference
+      FROM fdps f
+      LEFT JOIN users u ON f.requester_id = u.id
+      WHERE f.id = $1
+    `,
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "FDP non trouvée" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Erreur lors de la récupération de la FDP:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+// Route spécifique pour le DG
+app.get("/api/fdp/pending/dg", authenticateToken, async (req, res) => {
+  if (req.user.role !== "directeur_general") {
+    return res.status(403).json({ message: "Accès non autorisé" });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT f.*, 
+        u.full_name as requester_name,
+        u.position as requester_position,
+        u.department as requester_department,
+        u.phone_number as requester_phone,
+        u.email as requester_email
+      FROM fdps f
+      LEFT JOIN users u ON f.requester_id = u.id
+      WHERE f.directeur_general_signature IS NULL -- Seulement les FDPs non signées par le DG
+      ORDER BY f.creation_date DESC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur lors de la récupération des FDPs:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.put("/api/fdp/:id", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+
+  try {
+    const fdp = await pool.query("SELECT * FROM fdps WHERE id = $1", [id]);
+    if (fdp.rows.length === 0) {
+      return res.status(404).json({ message: "FDP non trouvée" });
+    }
+
+    if (
+      fdp.rows[0].requester_id !== req.user.id &&
+      req.user.role !== "directeur_general"
+    ) {
+      return res.status(403).json({ message: "Non autorisé" });
+    }
+
+    const result = await pool.query(
+      `UPDATE fdps SET
+        description = COALESCE($1, description),
+        amount = COALESCE($2, amount),
+        payment_method = COALESCE($3, payment_method),
+        payment_reference = COALESCE($4, payment_reference),
+        department_source = COALESCE($5, department_source),
+        department_destination = COALESCE($6, department_destination),
+        status = COALESCE($7, status),
+        type_description = COALESCE($8, type_description),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $9 RETURNING *`,
+      [
+        updates.description,
+        updates.amount,
+        updates.payment_method,
+        updates.payment_reference,
+        updates.department_source,
+        updates.department_destination,
+        updates.status,
+        updates.type_description,
+        id,
+      ]
+    );
+
+    // Récupérer les informations complètes
+    const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [
+      result.rows[0].requester_id,
+    ]);
+
+    const updatedFdp = result.rows[0];
+    updatedFdp.requesterName = userResult.rows[0].full_name;
+    updatedFdp.requesterPosition = userResult.rows[0].position;
+    updatedFdp.requesterDepartment = userResult.rows[0].department;
+    updatedFdp.requesterPhone = userResult.rows[0].phone_number;
+    updatedFdp.requesterEmail = userResult.rows[0].email;
+
+    res.json(updatedFdp);
+  } catch (err) {
+    console.error("Erreur lors de la mise à jour de la FDP:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.delete("/api/fdp/:id", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const fdp = await pool.query("SELECT * FROM fdps WHERE id = $1", [id]);
+    if (fdp.rows.length === 0) {
+      return res.status(404).json({ message: "FDP non trouvée" });
+    }
+
+    // Autoriser l'admin à supprimer sans restriction
+    if (req.user.role === "admin") {
+      await pool.query("DELETE FROM fdps WHERE id = $1", [id]);
+      return res.json({ message: "FDP supprimée avec succès" });
+    }
+
+    // Vérifications normales pour les autres rôles
+    if (fdp.rows[0].requester_id !== req.user.id) {
+      return res.status(403).json({ message: "Non autorisé" });
+    }
+
+    await pool.query("DELETE FROM fdps WHERE id = $1", [id]);
+    res.json({ message: "FDP supprimée avec succès" });
+  } catch (err) {
+    console.error("Erreur lors de la suppression de la FDP:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.post("/api/fdp/:id/sign", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const {
+    signature,
+    approved,
+    rejectionReason,
+    validatedAmount,
+    selectedRole, // Ajouter le rôle sélectionné dans la requête
+  } = req.body;
+
+  // Utiliser le rôle sélectionné ou le rôle réel
+  const signingRole = selectedRole || req.user.role;
+
+  try {
+    const fdpResult = await pool.query("SELECT * FROM fdps WHERE id = $1", [
+      id,
+    ]);
+    if (fdpResult.rows.length === 0) {
+      return res.status(404).json({ message: "FDP non trouvée" });
+    }
+
+    const fdp = fdpResult.rows[0];
+
+    if (!approved) {
+      const result = await pool.query(
+        `UPDATE fdps SET
+          status = 'rejected',
+          rejection_reason = $1,
+          rejected_by = $2,
+          rejection_date = CURRENT_TIMESTAMP
+        WHERE id = $3 RETURNING *`,
+        [rejectionReason, req.user.fullName, id]
+      );
+      return res.json(result.rows[0]);
+    }
+
+    // Si le demandeur signe
+    if (signingRole === "demandeur") {
+      const result = await pool.query(
+        `UPDATE fdps SET
+          requester_signature = $1,
+          requester_signature_date = CURRENT_TIMESTAMP,
+          status = 'pending_superieur_hierarchique'
+        WHERE id = $2 RETURNING *`,
+        [signature, id]
+      );
+      return res.json(result.rows[0]);
+    }
+
+    // Si le DG signe en tant que DG
+    if (signingRole === "directeur_general") {
+      let amountValue = null;
+
+      if (fdp.type_description !== "Expression de besoin") {
+        if (!validatedAmount) {
+          return res.status(400).json({
+            message:
+              "Erreur : Le montant validé est obligatoire. Veuillez saisir un montant.",
+          });
+        }
+
+        const cleanedAmount = validatedAmount.toString().replace(/[^0-9]/g, "");
+        if (cleanedAmount === "") {
+          return res.status(400).json({
+            message:
+              "Format invalide : Seuls les chiffres sont autorisés. Exemple : 250000 (sans espaces, virgules ou points).",
+          });
+        }
+
+        amountValue = parseInt(cleanedAmount, 10);
+        if (isNaN(amountValue)) {
+          return res.status(400).json({
+            message:
+              "Erreur technique : Impossible de convertir le montant. Contactez l'administrateur.",
+          });
+        }
+
+        if (amountValue <= 0) {
+          return res.status(400).json({
+            message:
+              "Montant incorrect : Le montant doit être supérieur à 0 FCFA.",
+          });
+        }
+      } else {
+        if (validatedAmount) {
+          const cleanedAmount = validatedAmount
+            .toString()
+            .replace(/[^0-9]/g, "");
+          if (cleanedAmount !== "") {
+            amountValue = parseInt(cleanedAmount, 10);
+            if (isNaN(amountValue)) {
+              return res.status(400).json({
+                message:
+                  "Erreur technique : Impossible de convertir le montant. Contactez l'administrateur.",
+              });
+            }
+            if (amountValue <= 0) {
+              return res.status(400).json({
+                message:
+                  "Montant incorrect : Le montant doit être supérieur à 0 FCFA.",
+              });
+            }
+          }
+        }
+      }
+
+      const result = await pool.query(
+        `UPDATE fdps SET
+          superieur_hierarchique_signature = COALESCE(superieur_hierarchique_signature, ' '),
+          superieur_hierarchique_signature_date = COALESCE(superieur_hierarchique_signature_date, NULL),
+          tresorerie_signature = COALESCE(tresorerie_signature, ' '),
+          tresorerie_signature_date = COALESCE(tresorerie_signature_date, NULL),
+          comptabilite_signature = COALESCE(comptabilite_signature, ' '),
+          comptabilite_signature_date = COALESCE(comptabilite_signature_date, NULL),
+          directeur_general_signature = $1,
+          directeur_general_signature_date = CURRENT_TIMESTAMP,
+          validated_amount = $2,
+          status = 'pending_caisse'
+        WHERE id = $3 RETURNING *`,
+        [signature, amountValue, id]
+      );
+
+      return res.json(result.rows[0]);
+    }
+
+    // Déterminer le champ de signature et le prochain statut
+    let signatureField = `${signingRole}_signature`;
+    let signatureDateField = `${signingRole}_signature_date`;
+    let nextStatus = getNextStatus(signingRole);
+
+    // Cas spécial : Trésorerie signant en tant que Caisse
+    if (
+      signingRole === "tresorerie" &&
+      fdp.status === "pending_caisse" &&
+      fdp.tresorerie_signature
+    ) {
+      signatureField = "caisse_signature";
+      signatureDateField = "caisse_signature_date";
+      nextStatus = getNextStatus("caisse");
+    }
+
+    const result = await pool.query(
+      `UPDATE fdps SET
+        ${signatureField} = $1,
+        ${signatureDateField} = CURRENT_TIMESTAMP,
+        status = $2
+      WHERE id = $3 RETURNING *`,
+      [signature, nextStatus, id]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Erreur lors de la signature de la FDP:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+
+// Helper function to determine next status
+function getNextStatus(currentRole) {
+  const workflow = {
+    //operations: "pending_fournisseur",
+    //fournisseur: "pending_superieur_hierarchique
+    demandeur: "pending_superieur_hierarchique",
+    //operations: "pending_superieur_hierarchique
+    superieur_hierarchique: "pending_tresorerie",
+    tresorerie: "pending_comptabilite",
+    comptabilite: "pending_directeur_general",
+    directeur_general: "pending_caisse",
+    caisse: "completed",
+  };
+
+  return workflow[currentRole] || "pending_superieur_hierarchique";
+}
+
+// Start server
+app.listen(process.env.PORT || 5000, "0.0.0.0", () => {
+  console.log(
+    `Server FDP running on http://197.159.195.207:${process.env.PORT || 5000}`
+  );
+});
+
+
+
+
+
+
+----
+server/index.ts
+---
+import express from "express";
+import cors from "cors";
+import { Pool } from "pg";
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+import dotenv from "dotenv";
+
+// Configuration
+dotenv.config();
+
+// Declare global type augmentation for Express Request
+declare global {
+  namespace Express {
+    interface Request {
+      user?: {
+        id: string;
+        role: string;
+        fullName: string;
+        position: string;
+        department: string;
+      };
+    }
+  }
+}
+
+const app = express();
+const port = process.env.PORT || 5000;
+
+// Database connection
+const pool = new Pool({
+  user: process.env.DB_USER || "postgres",
+  password: process.env.DB_PASSWORD || "7284",
+  host: process.env.DB_HOST || "localhost",
+  port: parseInt(process.env.DB_PORT || "5432"),
+  database: process.env.DB_NAME || "Vipnet_fiche",
+});
+
+// Middleware
+app.use(
+  cors({
+    origin: [
+      "http://localhost",
+      "http://localhost:5173",
+      "http://197.159.195.207",
+      "http://197.159.195.207:5173",
+    ],
+    methods: "GET,POST,PUT,DELETE",
+    credentials: true,
+  })
+);
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Modification du middleware d'authentification
+const authenticateToken = (
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ message: "Token manquant" });
+  }
+
+  jwt.verify(
+    token,
+    process.env.JWT_SECRET || "vipnet-fdp-secret-key",
+    (err: any, user: any) => {
+      if (err) {
+        return res.status(403).json({ message: "Token invalide" });
+      }
+      // Ajout d'une vérification de type explicite
+      if (
+        typeof user === "object" &&
+        user.id &&
+        user.role &&
+        user.fullName &&
+        user.position &&
+        user.department
+      ) {
+        req.user = user;
+        next();
+      } else {
+        return res.status(403).json({ message: "Token malformé" });
+      }
+    }
+  );
+};
+
+// Auth routes
+
+// GET tous les utilisateurs (admin seulement)
+app.get("/api/users", authenticateToken, async (req, res) => {
+  // Vérification explicite avant utilisation
+  if (!req.user) {
+    return res.status(403).json({ message: "Utilisateur non authentifié" });
+  }
+
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ message: "Accès non autorisé" });
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT id, username, email, role, full_name FROM users"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur récupération utilisateurs:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.post(
+  "/api/users/:id/reset-password",
+  authenticateToken,
+  async (req, res) => {
+    // Vérification explicite
+    if (!req.user) {
+      return res.status(401).json({ message: "Non authentifié" });
+    }
+
+    if (req.user.role !== "admin") {
+      return res
+        .status(403)
+        .json({ message: "Accès réservé aux administrateurs" });
+    }
+
+    const { id } = req.params;
+    const { newPassword } = req.body;
+
+    if (!newPassword) {
+      return res
+        .status(400)
+        .json({ message: "Le nouveau mot de passe est requis" });
+    }
+
+    try {
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      const result = await pool.query(
+        "UPDATE users SET password = $1 WHERE id = $2 RETURNING id, username, email",
+        [hashedPassword, id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ message: "Utilisateur non trouvé" });
+      }
+
+      res.json({
+        success: true,
+        message: "Mot de passe modifié avec succès",
+      });
+    } catch (err) {
+      console.error("Erreur modification mot de passe:", err);
+      res.status(500).json({ message: "Erreur serveur" });
+    }
+  }
+);
+
+// Mettre à jour un utilisateur
+app.get("/api/fdp/mine", authenticateToken, async (req, res) => {
+  // Vérification obligatoire
+  if (!req.user) {
+    return res.status(403).json({ message: "Utilisateur non authentifié" });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT f.*...`,
+      [req.user.id] // Maintenant safe
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur mise à jour utilisateur:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+// Auth routes
+app.post("/api/register", async (req, res) => {
+  const {
+    username,
+    password,
+    email,
+    full_name,
+    role,
+    position,
+    department,
+    phone_number,
+  } = req.body;
+
+  // Validation des champs obligatoires
+  const requiredFields = [
+    "username",
+    "password",
+    "email",
+    "full_name",
+    "role",
+    "position",
+    "department",
+  ];
+  const missingFields = requiredFields.filter((field) => !req.body[field]);
+
+  if (missingFields.length > 0) {
+    return res.status(400).json({
+      error: "Champs obligatoires manquants",
+      missingFields,
+    });
+  }
+
+  try {
+    // Vérification de l'unicité
+    const userCheck = await pool.query(
+      "SELECT * FROM users WHERE username = $1 OR email = $2",
+      [username, email]
+    );
+
+    if (userCheck.rows.length > 0) {
+      return res.status(409).json({
+        error: "Utilisateur existe déjà",
+        conflict: {
+          username: userCheck.rows[0].username === username,
+          email: userCheck.rows[0].email === email,
+        },
+      });
+    }
+
+    // Hash du mot de passe
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Insertion dans la base de données
+    const newUser = await pool.query(
+      `INSERT INTO users (
+        username, password, email, full_name,
+        role, position, department, phone_number
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id, username, email, role, position, department`,
+      [
+        username,
+        hashedPassword,
+        email,
+        full_name,
+        role,
+        position,
+        department,
+        phone_number || null,
+      ]
+    );
+
+    res.status(201).json({
+      success: true,
+      user: newUser.rows[0],
+      message: "Compte créé avec succès",
+    });
+  } catch (error) {
+    console.error("Erreur inscription:", error);
+    res.status(500).json({
+      error: "Erreur serveur",
+      details: error.message,
+    });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    const result = await pool.query("SELECT * FROM users WHERE username = $1", [
+      username,
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ message: "Identifiants invalides" });
+    }
+
+    const user = result.rows[0];
+    const validPassword = await bcrypt.compare(password, user.password);
+
+    if (!validPassword) {
+      return res.status(401).json({ message: "Identifiants invalides" });
+    }
+
+    const token = jwt.sign(
+      {
+        id: user.id,
+        role: user.role,
+        fullName: user.full_name,
+        position: user.position,
+        department: user.department,
+      },
+      process.env.JWT_SECRET || "vipnet-fdp-secret-key",
+      { expiresIn: "24h" }
+    );
+
+    res.json({
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      fullName: user.full_name,
+      position: user.position,
+      department: user.department,
+      phoneNumber: user.phone_number,
+      token,
+    });
+  } catch (err) {
+    console.error("Erreur lors de la connexion:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+// FDP routes
+app.post("/api/fdp", authenticateToken, async (req, res) => {
+  const {
+    creationDate,
+    description,
+    amount,
+    paymentMethod,
+    paymentReference,
+    departmentSource,
+    departmentDestination,
+    requesterSignature,
+    requesterSignatureDate,
+    type_description,
+  } = req.body;
+
+  try {
+    // Conversion de la date en objet Date
+    const creationDateObj = new Date(creationDate);
+    if (isNaN(creationDateObj.getTime())) {
+      return res.status(400).json({ message: "Date de création invalide" });
+    }
+
+    // Étape 1 : Création avec référence temporaire
+    const tempReference = `TEMP-${creationDateObj.toLocaleDateString("fr-FR")}-F`;
+    const createResult = await pool.query(
+      `INSERT INTO fdps (
+        reference,
+        creation_date,
+        requester_id,
+        description,
+        amount,
+        payment_method,
+        payment_reference,
+        department_source,
+        department_destination,
+        status,
+        requester_signature,
+        requester_signature_date,
+        type_description
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+      [
+        tempReference,
+        creationDateObj,
+        req.user!.id,
+        description,
+        amount,
+        paymentMethod,
+        paymentReference,
+        departmentSource,
+        departmentDestination,
+        "pending_superieur_hierarchique",
+        requesterSignature,
+        requesterSignatureDate,
+        type_description,
+      ]
+    );
+
+    // Étape 2 : Générer la référence finale
+    const newId = createResult.rows[0].id;
+    const finalReference = `${newId} - ${creationDateObj.toLocaleDateString("fr-FR")} - F`;
+
+    // Étape 3 : Mise à jour de la référence
+    await pool.query(`UPDATE fdps SET reference = $1 WHERE id = $2`, [
+      finalReference,
+      newId,
+    ]);
+
+    // Étape 4 : Récupération de la FDP finale
+    const finalResult = await pool.query("SELECT * FROM fdps WHERE id = $1", [
+      newId,
+    ]);
+
+    // Ajout des infos du demandeur
+    const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [
+      req.user!.id,
+    ]);
+    const fdp = finalResult.rows[0];
+    fdp.requesterName = userResult.rows[0].full_name;
+    fdp.requesterPosition = userResult.rows[0].position;
+    fdp.requesterDepartment = userResult.rows[0].department;
+    fdp.requesterPhone = userResult.rows[0].phone_number;
+    fdp.requesterEmail = userResult.rows[0].email;
+
+    res.json(fdp);
+  } catch (err) {
+    console.error("Erreur lors de la création de la FDP:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.get("/api/fdp/mine", authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT f.*, 
+        u.full_name as requester_name,
+        u.position as requester_position,
+        u.department as requester_department,
+        u.phone_number as requester_phone,
+        u.email as requester_email
+      FROM fdps f
+      LEFT JOIN users u ON f.requester_id = u.id
+      WHERE f.requester_id = $1
+      ORDER BY f.creation_date DESC
+    `,
+      [req.user!.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur lors de la récupération des FDPs:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.get("/api/fdp/pending/:role", authenticateToken, async (req, res) => {
+  const { role } = req.params;
+  const statusMap = {
+    operations: "pending_operations",
+    supérieur_hierarchique: "pending_superieur_hierarchique",
+    tresorerie: "pending_tresorerie",
+    comptabilite: "pending_comptabilite",
+    directeur_general: "pending_directeur_general",
+    caisse: "pending_caisse",
+  };
+
+  try {
+    let query = `
+      SELECT f.*, 
+        u.full_name as requester_name,
+        u.position as requester_position,
+        u.department as requester_department,
+        u.phone_number as requester_phone,
+        u.email as requester_email
+      FROM fdps f
+      LEFT JOIN users u ON f.requester_id = u.id
+      WHERE f.status NOT IN ('completed', 'rejected')
+    `;
+
+    // Logique spéciale pour le DG
+    if (role === "directeur_general") {
+      query += ` AND f.directeur_general_signature IS NULL`;
+    } else {
+      query += ` AND f.status = $1`;
+    }
+
+    query += ` ORDER BY f.creation_date DESC`;
+
+    const result = await pool.query(
+      query,
+      role === "directeur_general" ? [] : [statusMap[role]]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur lors de la récupération des FDPs:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.get("/api/fdp", authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT f.*, 
+        u.full_name as requester_name,
+        u.position as requester_position,
+        u.department as requester_department,
+        u.phone_number as requester_phone,
+        u.email as requester_email,
+        CASE 
+          WHEN f.reference LIKE 'TEMP-%' THEN 'En attente de finalisation'
+          ELSE f.reference 
+        END as formatted_reference
+      FROM fdps f
+      LEFT JOIN users u ON f.requester_id = u.id
+      ORDER BY f.creation_date DESC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur lors de la récupération des FDPs:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.get("/api/fdp/:id", authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT f.*, 
+        u.full_name as requester_name,
+        u.position as requester_position,
+        u.department as requester_department,
+        u.phone_number as requester_phone,
+        u.email as requester_email,
+        CASE 
+          WHEN f.reference LIKE 'TEMP-%' THEN 'En attente de finalisation'
+          ELSE f.reference 
+        END as formatted_reference
+      FROM fdps f
+      LEFT JOIN users u ON f.requester_id = u.id
+      WHERE f.id = $1
+    `,
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: "FDP non trouvée" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Erreur lors de la récupération de la FDP:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.put("/api/fdp/:id", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body;
+
+  try {
+    const fdp = await pool.query("SELECT * FROM fdps WHERE id = $1", [id]);
+    if (fdp.rows.length === 0) {
+      return res.status(404).json({ message: "FDP non trouvée" });
+    }
+
+    if (
+      fdp.rows[0].requester_id !== req.user!.id &&
+      req.user!.role !== "directeur_general"
+    ) {
+      return res.status(403).json({ message: "Non autorisé" });
+    }
+
+    const result = await pool.query(
+      `UPDATE fdps SET
+        description = COALESCE($1, description),
+        amount = COALESCE($2, amount),
+        payment_method = COALESCE($3, payment_method),
+        payment_reference = COALESCE($4, payment_reference),
+        department_source = COALESCE($5, department_source),
+        department_destination = COALESCE($6, department_destination),
+        status = COALESCE($7, status),
+        type_description = COALESCE($8, type_description),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $9 RETURNING *`,
+      [
+        updates.description,
+        updates.amount,
+        updates.paymentMethod,
+        updates.paymentReference,
+        updates.departmentSource,
+        updates.departmentDestination,
+        updates.status,
+        updates.type_description,
+        id,
+      ]
+    );
+
+    // Récupérer les informations complètes
+    const userResult = await pool.query("SELECT * FROM users WHERE id = $1", [
+      result.rows[0].requester_id,
+    ]);
+
+    const updatedFdp = result.rows[0];
+    updatedFdp.requesterName = userResult.rows[0].full_name;
+    updatedFdp.requesterPosition = userResult.rows[0].position;
+    updatedFdp.requesterDepartment = userResult.rows[0].department;
+    updatedFdp.requesterPhone = userResult.rows[0].phone_number;
+    updatedFdp.requesterEmail = userResult.rows[0].email;
+
+    res.json(updatedFdp);
+  } catch (err) {
+    console.error("Erreur lors de la mise à jour de la FDP:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.delete("/api/fdp/:id", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const fdp = await pool.query("SELECT * FROM fdps WHERE id = $1", [id]);
+    if (fdp.rows.length === 0) {
+      return res.status(404).json({ message: "FDP non trouvée" });
+    }
+
+    // Autoriser l'admin à supprimer sans restriction
+    if (req.user!.role === "admin") {
+      await pool.query("DELETE FROM fdps WHERE id = $1", [id]);
+      return res.json({ message: "FDP supprimée avec succès" });
+    }
+
+    // Vérifications normales pour les autres rôles
+    if (fdp.rows[0].requester_id !== req.user!.id) {
+      return res.status(403).json({ message: "Non autorisé" });
+    }
+
+    await pool.query("DELETE FROM fdps WHERE id = $1", [id]);
+    res.json({ message: "FDP supprimée avec succès" });
+  } catch (err) {
+    console.error("Erreur lors de la suppression de la FDP:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+app.post("/api/fdp/:id/sign", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const {
+    signature,
+    approved,
+    rejectionReason,
+    validatedAmount,
+    selectedRole, // Ajout du rôle sélectionné
+  } = req.body;
+
+  const signingRole: string = selectedRole || req.user!.role;
+
+  try {
+    const fdpResult = await pool.query("SELECT * FROM fdps WHERE id = $1", [id]);
+
+    if (fdpResult.rows.length === 0) {
+      return res.status(404).json({ message: "FDP non trouvée" });
+    }
+
+    const fdp = fdpResult.rows[0];
+
+    if (!approved) {
+      const result = await pool.query(
+        `UPDATE fdps SET
+          status = 'rejected',
+          rejection_reason = $1,
+          rejected_by = $2,
+          rejection_date = CURRENT_TIMESTAMP
+        WHERE id = $3 RETURNING *`,
+        [rejectionReason, req.user!.fullName, id]
+      );
+      return res.json(result.rows[0]);
+    }
+
+    // Cas du demandeur
+    if (signingRole === "demandeur") {
+      const result = await pool.query(
+        `UPDATE fdps SET
+          requester_signature = $1,
+          requester_signature_date = CURRENT_TIMESTAMP,
+          status = 'pending_superieur_hierarchique'
+        WHERE id = $2 RETURNING *`,
+        [signature, id]
+      );
+      return res.json(result.rows[0]);
+    }
+
+    // Cas du Directeur Général
+    if (signingRole === "directeur_general") {
+      let amountValue: number | null = null;
+
+      if (fdp.type_description !== "Expression de besoin") {
+        if (!validatedAmount) {
+          return res.status(400).json({
+            message: "Erreur : Le montant validé est obligatoire. Veuillez saisir un montant.",
+          });
+        }
+
+        const cleanedAmount = validatedAmount.toString().replace(/[^0-9]/g, "");
+        if (cleanedAmount === "") {
+          return res.status(400).json({
+            message: "Format invalide : Seuls les chiffres sont autorisés. Exemple : 250000",
+          });
+        }
+
+        amountValue = parseInt(cleanedAmount, 10);
+        if (isNaN(amountValue)) {
+          return res.status(400).json({
+            message: "Erreur technique : Impossible de convertir le montant.",
+          });
+        }
+
+        if (amountValue <= 0) {
+          return res.status(400).json({
+            message: "Montant incorrect : Le montant doit être supérieur à 0 FCFA.",
+          });
+        }
+      } else {
+        // Expression de besoin : montant facultatif
+        if (validatedAmount) {
+          const cleanedAmount = validatedAmount.toString().replace(/[^0-9]/g, "");
+          if (cleanedAmount !== "") {
+            amountValue = parseInt(cleanedAmount, 10);
+            if (isNaN(amountValue)) {
+              return res.status(400).json({
+                message: "Erreur technique : Impossible de convertir le montant.",
+              });
+            }
+            if (amountValue <= 0) {
+              return res.status(400).json({
+                message: "Montant incorrect : Le montant doit être supérieur à 0 FCFA.",
+              });
+            }
+          }
+        }
+      }
+
+      const result = await pool.query(
+        `UPDATE fdps SET
+          superieur_hierarchique_signature = COALESCE(superieur_hierarchique_signature, ' '),
+          superieur_hierarchique_signature_date = COALESCE(superieur_hierarchique_signature_date, NULL),
+          tresorerie_signature = COALESCE(tresorerie_signature, ' '),
+          tresorerie_signature_date = COALESCE(tresorerie_signature_date, NULL),
+          comptabilite_signature = COALESCE(comptabilite_signature, ' '),
+          comptabilite_signature_date = COALESCE(comptabilite_signature_date, NULL),
+          directeur_general_signature = $1,
+          directeur_general_signature_date = CURRENT_TIMESTAMP,
+          validated_amount = $2,
+          status = 'pending_caisse'
+        WHERE id = $3 RETURNING *`,
+        [signature, amountValue, id]
+      );
+
+      return res.json(result.rows[0]);
+    }
+
+    // Pour les autres rôles
+    let signatureField = `${signingRole}_signature`;
+    let signatureDateField = `${signingRole}_signature_date`;
+    let nextStatus = getNextStatus(signingRole);
+
+    // Cas spécial : trésorerie signant en tant que caisse
+    if (
+      signingRole === "tresorerie" &&
+      fdp.status === "pending_caisse" &&
+      fdp.tresorerie_signature
+    ) {
+      signatureField = "caisse_signature";
+      signatureDateField = "caisse_signature_date";
+      nextStatus = getNextStatus("caisse");
+    }
+
+    const result = await pool.query(
+      `UPDATE fdps SET
+        ${signatureField} = $1,
+        ${signatureDateField} = CURRENT_TIMESTAMP,
+        status = $2
+      WHERE id = $3 RETURNING *`,
+      [signature, nextStatus, id]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Erreur lors de la signature de la FDP:", err);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+
+// Helper function to determine next status
+function getNextStatus(currentRole: string): string {
+  const workflow = {
+    //operations: "pending_superieur_hierarchique",
+    demandeur: "pending_superieur_hierarchique", // Ajouter cette ligne
+    supérieur_hierarchique: "pending_tresorerie",
+    tresorerie: "pending_comptabilite",
+    comptabilite: "pending_directeur_general",
+    directeur_general: "pending_caisse",
+    caisse: "completed",
+  };
+
+  return (
+    workflow[currentRole as keyof typeof workflow] ||
+    "pending_superieur_hierarchique"
+  );
+}
+
+// Start server
+app.listen(5001, "0.0.0.0", () => {
+  console.log(`Server running on http://197.159.195.207:5000`);
+});
+
+
+---
+src/api/index.ts
+--
+import { User, FDP, SignatureAction, UserRole } from "../types";
+
+const API_URL = "/api";
+
+// Type pour les options de requête
+type FetchOptions = {
+  signal?: AbortSignal;
+};
+
+// Helper function to get token
+const getToken = (): string => {
+  const user = localStorage.getItem("user");
+  if (!user) {
+    console.error("Aucun utilisateur trouvé dans localStorage");
+    return "";
+  }
+
+  try {
+    const userData = JSON.parse(user);
+    return userData.token || "";
+  } catch (error) {
+    console.error("Erreur lors de la récupération du token:", error);
+    return "";
+  }
+};
+
+// Helper function to handle API responses
+const handleResponse = async (response: Response) => {
+  if (!response.ok) {
+    const text = await response.text();
+    try {
+      const json = JSON.parse(text);
+      throw new Error(json.message || "Erreur serveur");
+    } catch (e) {
+      throw new Error("Erreur de communication avec le serveur");
+    }
+  }
+  return response.json();
+};
+
+// Helper function to make authenticated requests
+const makeAuthenticatedRequest = async (
+  url: string,
+  options: RequestInit & FetchOptions = {}
+): Promise<any> => {
+  const token = getToken();
+  if (!token) throw new Error("Non authentifié");
+
+  const headers = {
+    ...options.headers,
+    Authorization: `Bearer ${token}`,
+  };
+
+  const response = await fetch(`${API_URL}${url}`, {
+    ...options,
+    headers,
+  });
+
+  return handleResponse(response);
+};
+
+// Auth API
+export const loginUser = async (
+  username: string,
+  password: string
+): Promise<User> => {
+  const response = await fetch(`${API_URL}/auth/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ username, password }),
+  });
+
+  return handleResponse(response);
+};
+
+// Ajouter cette fonction avec les autres exports
+export const registerUser = async (userData: {
+  username: string;
+  password: string;
+  email: string;
+  full_name: string;
+  role: string;
+  position: string;
+  department: string;
+  phone_number?: string;
+}) => {
+  const response = await fetch("/api/register", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(userData),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    if (data.error === "Utilisateur existe déjà") {
+      if (data.conflict?.username) {
+        throw new Error("Ce nom d'utilisateur est déjà utilisé");
+      }
+      if (data.conflict?.email) {
+        throw new Error("Cet email est déjà utilisé");
+      }
+    }
+    throw new Error(data.error || "Erreur lors de l'inscription");
+  }
+
+  return data;
+};
+
+// FDP API
+export const createFDP = async (fdpData: Partial<FDP>): Promise<FDP> => {
+  return makeAuthenticatedRequest("/fdp", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(fdpData),
+  });
+};
+
+export const updateFDP = async (
+  id: number,
+  fdpData: Partial<FDP>
+): Promise<FDP> => {
+  return makeAuthenticatedRequest(`/fdp/${id}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(fdpData),
+  });
+};
+
+export const getFDP = async (
+  id: number,
+  options?: FetchOptions
+): Promise<FDP> => {
+  const data = await makeAuthenticatedRequest(`/fdp/${id}`, {
+    ...options,
+  });
+  return {
+    ...data,
+    requesterName: data.requester_name,
+  };
+};
+
+export const getAllFDPs = async (options?: FetchOptions): Promise<FDP[]> => {
+  const data = await makeAuthenticatedRequest("/fdp", {
+    ...options,
+  });
+  return data.map((fdp: any) => ({
+    ...fdp,
+    requesterName: fdp.requester_name,
+  }));
+};
+
+export const getMyFDPs = async (options?: FetchOptions): Promise<FDP[]> => {
+  const data = await makeAuthenticatedRequest("/fdp/mine", {
+    ...options,
+  });
+  return data.map((fdp: any) => ({
+    ...fdp,
+    requesterName: fdp.requester_name,
+  }));
+};
+
+export const getMyPendingFDPs = async (
+  role: string,
+  options?: FetchOptions
+): Promise<FDP[]> => {
+  const data = await makeAuthenticatedRequest(`/fdp/pending/${role}`, {
+    ...options,
+  });
+
+  // Si l'utilisateur est le DG, filtrer les fiches sans signature DG
+  if (role === UserRole.DIRECTEUR_GENERAL) {
+    return data
+      .filter((fdp: any) => !fdp.directeur_general_signature) // Filtrer les fiches sans signature DG
+      .map((fdp: any) => ({
+        ...fdp,
+        requesterName: fdp.requester_name,
+      }));
+  }
+
+  // Pour les autres rôles, retourner les fiches normalement
+  return data.map((fdp: any) => ({
+    ...fdp,
+    requesterName: fdp.requester_name,
+  }));
+};
+
+export const deleteFDP = async (id: number): Promise<void> => {
+  return makeAuthenticatedRequest(`/fdp/${id}`, {
+    method: "DELETE",
+  });
+};
+
+  export const signFDP = async (signatureData: SignatureAction): Promise<FDP> => {
+    // Ajouter le rôle sélectionné dans la requête
+    const data = await makeAuthenticatedRequest(
+      `/fdp/${signatureData.fdpId}/sign`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ...signatureData,
+          selectedRole: signatureData.selectedRole // Ajout crucial
+        }),
+      }
+    );
+    return {
+      ...data,
+      requesterName: data.requester_name,
+    };
+  };
+----
+src/components/Dashboard.tsx
+import React, { useState, useEffect } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
+import { format } from "date-fns";
+import { getAllFDPs, getMyFDPs, getMyPendingFDPs } from "../api";
+import { FDP, FDPStatus, UserRole } from "../types";
+import { useAuth } from "../context/AuthContext";
+import { 
+  FileText, 
+  Plus, 
+  Clock, 
+  CheckCircle, 
+  XCircle, 
+  TrendingUp, 
+  Users, 
+  CreditCard,
+  Calendar,
+  Search
+} from "lucide-react";
+
+const Dashboard: React.FC = () => {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [fdps, setFdps] = useState<FDP[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"all" | "pending" | "mine">("all");
+  const [searchTerm, setSearchTerm] = useState<string>("");
+  const [selectedRole, setSelectedRole] = useState<UserRole>(
+    user?.role ?? UserRole.DEMANDEUR
+  );
+  const [pendingFdps, setPendingFdps] = useState<FDP[]>([]);
+
+  const fetchFDPs = async () => {
+    const abortController = new AbortController();
+
+    try {
+      setLoading(true);
+      let data: FDP[] = [];
+
+      switch (activeTab) {
+        case "pending":
+          data = await getMyPendingFDPs(selectedRole, {
+            signal: abortController.signal,
+          });
+          break;
+        case "mine":
+          data = await getMyFDPs({ signal: abortController.signal });
+          break;
+        case "all":
+        default:
+          data = await getAllFDPs({ signal: abortController.signal });
+          break;
+      }
+
+      data.sort((a, b) => {
+        const dateA = new Date(a.creation_date).getTime();
+        const dateB = new Date(b.creation_date).getTime();
+        return dateB - dateA;
+      });
+      
+      setFdps(data);
+
+      if (activeTab !== "pending") {
+        const pendingData = await getMyPendingFDPs(selectedRole, {
+          signal: abortController.signal,
+        });
+        setPendingFdps(pendingData);
+      } else {
+        setPendingFdps(data);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch FDPs");
+    } finally {
+      setLoading(false);
+    }
+
+    return () => abortController.abort();
+  };
+
+  useEffect(() => {
+    fetchFDPs();
+  }, [activeTab, selectedRole, location.state?.refresh]);
+
+  const getStatusBadge = (status: FDPStatus) => {
+    const config = {
+      [FDPStatus.DRAFT]: {
+        bg: "bg-slate-100",
+        text: "text-slate-700",
+        icon: FileText,
+        label: "Brouillon"
+      },
+      [FDPStatus.PENDING]: {
+        bg: "bg-amber-100", 
+        text: "text-amber-700",
+        icon: Clock,
+        label: "En attente"
+      },
+      [FDPStatus.COMPLETED]: {
+        bg: "bg-emerald-100",
+        text: "text-emerald-700", 
+        icon: CheckCircle,
+        label: "Validée"
+      },
+      [FDPStatus.REJECTED]: {
+        bg: "bg-rose-100",
+        text: "text-rose-700",
+        icon: XCircle,
+        label: "Rejetée"
+      }
+    } as const;
+
+    const statusConfig = config[status as keyof typeof config] || config[FDPStatus.PENDING];
+    const Icon = statusConfig.icon;
+
+    return (
+      <span className={`inline-flex items-center px-3 py-1.5 rounded-full text-xs font-semibold ${statusConfig.bg} ${statusConfig.text}`}>
+        <Icon size={14} className="mr-1.5" />
+        {statusConfig.label}
+      </span>
+    );
+  };
+
+  const formatRoleName = (role: UserRole) => {
+    return role.split('_').map(word => word[0].toUpperCase() + word.slice(1)).join(' ');
+  };
+
+  const formatCurrency = (amount: number | string | null) => {
+    if (amount === null || amount === undefined) return "0 FCFA";
+    const numAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
+    return new Intl.NumberFormat('fr-FR').format(numAmount) + " FCFA";
+  };
+
+  const getFilteredFDPs = () => {
+    let filtered = fdps;
+    
+    if (searchTerm) {
+      filtered = filtered.filter(fdp => 
+        fdp.reference.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        fdp.requester_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        fdp.description.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+    }
+
+    return filtered;
+  };
+
+  const parseAmount = (amount: number | string | null): number => {
+    if (amount === null || amount === undefined) return 0;
+    return typeof amount === 'string' ? parseFloat(amount) || 0 : amount;
+  };
+
+  const totalAmount = fdps
+    .filter(fdp => fdp.status === FDPStatus.COMPLETED)
+    .reduce((sum, fdp) => {
+      const validatedAmount = parseAmount(fdp.validated_amount);
+      const regularAmount = parseAmount(fdp.amount);
+      return sum + (validatedAmount || regularAmount);
+    }, 0);
+  
+  const completedCount = fdps.filter(fdp => fdp.status === FDPStatus.COMPLETED).length;
+  const pendingCount = pendingFdps.length;
+  const uniqueRequesters = [...new Set(fdps.map(fdp => fdp.requester_name))].length;
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
+      <div className="bg-white border-b border-slate-200 shadow-sm">
+        <div className="container mx-auto px-6 py-4">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div>
+              <h1 className="text-3xl font-bold text-slate-900">Bureau des Dépenses</h1>
+              <p className="text-slate-600 mt-1">
+                {activeTab === "all" && "Toutes les fiches de dépenses"}
+                {activeTab === "pending" && "Fiches en attente de validation"}
+                {activeTab === "mine" && "Mes fiches de dépenses"}
+              </p>
+            </div>
+            
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+              <div className="relative">
+                <Search size={20} className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Rechercher..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="pl-10 pr-4 py-2.5 w-64 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
+                />
+              </div>
+
+              {(user?.role === UserRole.DIRECTEUR_GENERAL || (user?.role && user.role !== UserRole.DEMANDEUR)) && (
+                <select
+                  value={selectedRole}
+                  onChange={(e) => setSelectedRole(e.target.value as UserRole)}
+                  className="px-4 py-2.5 bg-white border border-slate-300 rounded-xl shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-slate-700"
+                >
+                  {user?.role === UserRole.DIRECTEUR_GENERAL
+                    ? (
+                      <>
+                        <option value={UserRole.DIRECTEUR_GENERAL}>
+                          {formatRoleName(UserRole.DIRECTEUR_GENERAL)}
+                        </option>
+                        <option value={UserRole.DEMANDEUR}>
+                          {formatRoleName(UserRole.DEMANDEUR)}
+                        </option>
+                        <option value={UserRole.CHEF_SERVICE}>
+                          {formatRoleName(UserRole.CHEF_SERVICE)}
+                        </option>
+                      </>
+                    )
+                    : user?.role && [user.role, UserRole.DEMANDEUR].map((role) => (
+                        <option key={role} value={role}>
+                          {formatRoleName(role)}
+                        </option>
+                      ))}
+                </select>
+              )}
+
+              {selectedRole === UserRole.DEMANDEUR && (
+                <button
+                  onClick={() => navigate("/fdp/new")}
+                  className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl transition-colors shadow-sm"
+                >
+                  <Plus size={18} />
+                  Nouvelle FDP
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="container mx-auto px-6 py-6">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-slate-600 text-sm font-medium">Total validé</p>
+                <p className="text-2xl font-bold text-slate-900 mt-1">{formatCurrency(totalAmount)}</p>
+              </div>
+              <div className="bg-blue-100 p-3 rounded-xl">
+                <CreditCard className="text-blue-600" size={24} />
+              </div>
+            </div>
+            <div className="flex items-center mt-4 text-sm">
+              <TrendingUp size={16} className="text-green-500 mr-1" />
+              <span className="text-green-600 font-medium">+12%</span>
+              <span className="text-slate-500 ml-1">ce mois</span>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-slate-600 text-sm font-medium">Fiches validées</p>
+                <p className="text-2xl font-bold text-emerald-600 mt-1">{completedCount}</p>
+              </div>
+              <div className="bg-emerald-100 p-3 rounded-xl">
+                <CheckCircle className="text-emerald-600" size={24} />
+              </div>
+            </div>
+            <div className="flex items-center mt-4 text-sm">
+              <span className="text-slate-500">Sur {fdps.length} fiches totales</span>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-slate-600 text-sm font-medium">En attente</p>
+                <p className="text-2xl font-bold text-amber-600 mt-1">{pendingCount}</p>
+              </div>
+              <div className="bg-amber-100 p-3 rounded-xl">
+                <Clock className="text-amber-600" size={24} />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-slate-600 text-sm font-medium">Demandeurs actifs</p>
+                <p className="text-2xl font-bold text-slate-900 mt-1">{uniqueRequesters}</p>
+              </div>
+              <div className="bg-purple-100 p-3 rounded-xl">
+                <Users className="text-purple-600" size={24} />
+              </div>
+            </div>
+            <div className="flex items-center mt-4 text-sm">
+              <span className="text-slate-500">Ce mois</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="border-b border-slate-200 px-6 py-4">
+            <div className="flex flex-wrap gap-1">
+              {[
+                { key: "all", label: "Toutes les fiches", icon: FileText },
+                { key: "pending", label: `En attente (${pendingCount})`, icon: Clock },
+                { key: "mine", label: "Mes fiches", icon: CheckCircle }
+              ].map(({ key, label, icon: Icon }) => (
+                <button
+                  key={key}
+                  onClick={() => setActiveTab(key as "all" | "pending" | "mine")}
+                  className={`flex items-center gap-2 px-4 py-2.5 rounded-xl transition-all font-medium ${
+                    activeTab === key
+                      ? "bg-blue-100 text-blue-700 shadow-sm"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+                  }`}
+                >
+                  <Icon size={18} />
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="p-6">
+            {error && (
+              <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-lg mb-6">
+                <div className="flex">
+                  <div className="flex-shrink-0">
+                    <XCircle className="h-5 w-5 text-red-500" />
+                  </div>
+                  <div className="ml-3">
+                    <p className="text-sm text-red-700">{error}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {loading ? (
+              <div className="flex justify-center items-center py-16">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+                <p className="mt-4 text-slate-600">Chargement des fiches...</p>
+              </div>
+            ) : getFilteredFDPs().length === 0 ? (
+              <div className="text-center py-16">
+                <div className="bg-slate-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <FileText className="text-slate-400" size={32} />
+                </div>
+                <h3 className="text-xl font-semibold text-slate-900 mb-2">
+                  {activeTab === "pending"
+                    ? "Aucune fiche en attente"
+                    : "Aucune fiche trouvée"}
+                </h3>
+                <p className="text-slate-500 mb-6">
+                  {activeTab === "pending"
+                    ? "Lorsque des fiches nécessiteront votre validation, elles apparaîtront ici."
+                    : "Commencez par créer une nouvelle fiche de dépenses."}
+                </p>
+                {selectedRole === UserRole.DEMANDEUR && (
+                  <button
+                    onClick={() => navigate("/fdp/new")}
+                    className="bg-blue-600 text-white px-6 py-3 rounded-xl hover:bg-blue-700 transition-colors"
+                  >
+                    <Plus size={18} className="inline mr-2" />
+                    Créer votre première fiche
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-slate-200 shadow-sm">
+                <table className="min-w-full">
+                  <thead>
+                    <tr className="border-b border-slate-200">
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                        Référence
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                        Date
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                        Demandeur
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                        Description
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                        Montant
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                        Statut
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {getFilteredFDPs().map((fdp) => (
+                      <tr 
+                        key={fdp.id} 
+                        className="hover:bg-slate-50 transition-colors cursor-pointer"
+                        onClick={() => navigate(`/fdp/${fdp.id}`, { state: { selectedRole } })}
+                      >
+                        <td className="px-6 py-4">
+                          <span className="font-semibold text-slate-900">{fdp.reference}</span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center text-slate-600">
+                            <Calendar size={16} className="mr-2" />
+                            {format(new Date(fdp.creation_date), "dd/MM/yyyy")}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center">
+                            <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center mr-3">
+                              <span className="text-blue-600 font-semibold text-sm">
+                                {fdp.requester_name.split(' ').map(n => n[0]).join('')}
+                              </span>
+                            </div>
+                            <span className="font-medium text-slate-900">{fdp.requester_name}</span>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4">
+                          <p className="text-slate-700 max-w-xs truncate" title={fdp.description}>
+                            {fdp.description}
+                          </p>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className="font-semibold text-slate-900">
+                            {formatCurrency(fdp.validated_amount || fdp.amount)}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          {getStatusBadge(fdp.status)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Dashboard;
+
+
+----
+src/components/FDPDetail.tsx
+import React, { useState, useEffect, useRef } from "react";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
+import { useReactToPrint } from "react-to-print";
+import { format } from "date-fns";
+import { getFDP, signFDP, deleteFDP } from "../api";
+import { FDP, UserRole, FDPStatus, SignatureAction } from "../types";
+import { useAuth } from "../context/AuthContext";
+import SignatureCanvas from "./SignatureCanvas";
+
+const FDPDetail: React.FC = () => {
+  const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [fdp, setFdp] = useState<FDP | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [signature, setSignature] = useState<string | null>(null);
+  const [validatedAmount, setValidatedAmount] = useState<string>("");
+  const [rejectionReason, setRejectionReason] = useState<string>("");
+  const [showRejectionForm, setShowRejectionForm] = useState(false);
+  const [signingInProgress, setSigningInProgress] = useState(false);
+  const printRef = useRef<HTMLDivElement>(null);
+
+  const location = useLocation();
+  const selectedRole = location.state?.selectedRole || user?.role;
+
+  const fetchFDP = async () => {
+    if (!id) return;
+
+    try {
+      setLoading(true);
+      const data = await getFDP(parseInt(id));
+      setFdp(data);
+      if (data.validated_amount) {
+        setValidatedAmount(data.validated_amount.toString());
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch FDP");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchFDP();
+  }, [id]);
+
+  const handlePrint = useReactToPrint({
+    content: () => printRef.current,
+  });
+
+  const canSign = () => {
+    if (!user || !fdp) return false;
+
+    // Utiliser le rôle sélectionné ou le rôle par défaut
+    const signingRole = selectedRole || user.role;
+
+    // Logique spéciale pour le DG qui peut permuter de rôle
+    if (user.role === UserRole.DIRECTEUR_GENERAL) {
+      // Si DG signe en tant que demandeur
+      if (signingRole === UserRole.DEMANDEUR) {
+        return fdp.status === FDPStatus.DRAFT && 
+              fdp.requester_id?.toString() === user.id?.toString();
+      }
+      // Si DG signe en tant que chef service
+      else if (signingRole === UserRole.CHEF_SERVICE) {
+        return fdp.status === FDPStatus.PENDING_CHEF_SERVICE;
+      }
+      // Si DG signe normalement (en tant que DG)
+      else {
+        return !fdp.directeur_general_signature;
+      }
+    }
+
+    // Logique originale inchangée pour les autres rôles
+    switch (user.role) {
+      case UserRole.DEMANDEUR:
+        return fdp.status === FDPStatus.DRAFT;
+      //case UserRole.OPERATIONS:
+      //return fdp.status === FDPStatus.PENDING_OPERATIONS;
+      case UserRole.CHEF_SERVICE:
+        return fdp.status === FDPStatus.PENDING_CHEF_SERVICE;
+      case UserRole.RESPONSABLE_FINANCIER:
+        return (
+          fdp.status === FDPStatus.PENDING_RESPONSABLE_FINANCIER ||
+          (fdp.status === FDPStatus.PENDING_CAISSE && fdp.tresorerie_signature)
+        );
+      case UserRole.RESPONSABLE_COMPTABLE:
+        return fdp.status === FDPStatus.PENDING_RESPONSABLE_COMPTABLE;
+      case UserRole.CAISSE:
+        return fdp.status === FDPStatus.PENDING_CAISSE;
+      default:
+        return false;
+    }
+  };
+
+  // Fonctions corrigées avec vérifications étendues
+  //const canDelete = () => {
+  //if (!user || !fdp) return false;
+
+  // return (
+  //user.role === UserRole.DEMANDEUR &&
+  //fdp.requester_id?.toString() === user.id?.toString() && // Vérifiez l'ID du demandeur
+  //!fdp.directeur_general_signature && // Vérifiez l'absence de signature DG
+  //!["completed", "rejected"].includes(fdp.status.toLowerCase()) // Vérifiez le statut
+  //);
+  //};
+  // Modifier les fonctions de permission
+
+  const canDelete = () => {
+    if (!selectedRole || !fdp) return false;
+
+    // Admin peut toujours supprimer
+    if (selectedRole === UserRole.ADMIN) {
+      return true;
+    }
+
+    // Conditions normales pour le demandeur
+    return (
+      selectedRole === UserRole.DEMANDEUR &&
+      fdp.requester_id?.toString() === user?.id?.toString() &&
+      !fdp.directeur_general_signature &&
+      !["completed", "rejected"].includes(fdp.status.toLowerCase())
+    );
+  };
+
+  /*const canEdit = () => {
+    if (!user || !fdp) return false;
+
+    return (
+      user.role === UserRole.DEMANDEUR &&
+      fdp.requester_id?.toString() === user.id?.toString() && // Vérifiez l'ID du demandeur
+      !fdp.directeur_general_signature && // Vérifiez l'absence de signature DG
+      [
+        "draft",
+        "pending_operations",
+        "pending_superieur_hierarchique",
+      ].includes(fdp.status.toLowerCase()) // Vérifiez le statut
+    );
+  };*/
+
+  const canEdit = () => {
+    if (!selectedRole || !fdp) return false;
+
+    return (
+      selectedRole === UserRole.DEMANDEUR && // Utiliser selectedRole
+      fdp.requester_id?.toString() === user?.id?.toString() &&
+      !fdp.directeur_general_signature &&
+      [
+        "draft",
+        "pending_operations",
+        "pending_superieur_hierarchique",
+      ].includes(fdp.status.toLowerCase())
+    );
+  };
+
+  const handleSign = async (approved: boolean) => {
+    if (!user || !fdp || !id) return;
+
+    try {
+      setSigningInProgress(true);
+
+      // Validation spécifique pour le DG lors de la signature
+      if (user.role === UserRole.DIRECTEUR_GENERAL && approved) {
+        // Vérifier si le type est "Expression de besoin"
+        if (fdp.type_description !== "Expression de besoin") {
+          // Validation existante pour les autres types
+          if (!validatedAmount) {
+            setError(
+              "Le montant validé est requis et doit être un nombre valide."
+            );
+            setSigningInProgress(false);
+            return;
+          }
+
+          const cleanedAmount = validatedAmount
+            .replace(/\s/g, "")
+            .replace(/,/g, ".");
+          const numericAmount = parseFloat(cleanedAmount);
+
+          if (isNaN(numericAmount)) {
+            setError(
+              "Le montant validé est requis et doit être un nombre valide."
+            );
+            setSigningInProgress(false);
+            return;
+          }
+
+          // Utiliser numericAmount pour les calculs ou l'enregistrement
+          console.log(numericAmount);
+        }
+        // Si "Expression de besoin", aucune validation du montant requise
+      }
+
+      const signatureData: SignatureAction = {
+        fdpId: parseInt(id),
+        signature: signature || "",
+        role: selectedRole, // Utiliser le rôle sélectionné
+        approved,
+        rejectionReason: approved ? undefined : rejectionReason,
+        selectedRole // Passer aussi explicitement
+      };
+
+      if (
+        user.role === UserRole.DIRECTEUR_GENERAL &&
+        approved &&
+        fdp.type_description !== "Expression de besoin"
+      ) {
+        const amount = parseFloat(validatedAmount);
+        if (isNaN(amount)) {
+          setError("Montant invalide");
+          return;
+        }
+        signatureData.validatedAmount = amount;
+      }
+
+      // Appel API de signature
+      const updatedFdp = await signFDP(signatureData);
+
+      // Mise à jour locale des données
+      setFdp((prev) => {
+        if (!prev) return updatedFdp; // Si prev est null, retourner directement updatedFdp
+
+        return {
+          ...prev,
+          ...updatedFdp,
+          // Assurer la rétention des infos existantes si non fournies
+          requester_name: updatedFdp.requester_name || prev.requester_name,
+          requester_position:
+            updatedFdp.requester_position || prev.requester_position,
+          requester_department:
+            updatedFdp.requester_department || prev.requester_department,
+          requester_phone: updatedFdp.requester_phone || prev.requester_phone,
+          requester_email: updatedFdp.requester_email || prev.requester_email,
+        };
+      });
+
+      // Réinitialisation des états
+      setShowRejectionForm(false);
+      setSignature(null);
+      setRejectionReason("");
+      setError(null); // Réinitialiser les erreurs
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to sign FDP");
+    } finally {
+      setSigningInProgress(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (
+      !id ||
+      !window.confirm("Êtes-vous sûr de vouloir supprimer cette fiche ?")
+    )
+      return;
+
+    try {
+      await deleteFDP(parseInt(id));
+      navigate("/dashboard");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete FDP");
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex justify-center items-center h-64">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+        {error}
+      </div>
+    );
+  }
+
+  if (!fdp) {
+    return (
+      <div className="text-center py-8">
+        <p className="text-xl text-gray-600">Fiche non trouvée</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="container mx-auto px-4 py-8">
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <div className="flex justify-between items-center mb-6">
+          <h1 className="text-2xl font-bold">
+            Fiche - {fdp.reference?.replace("TEMP-", "")}
+          </h1>
+          <div className="flex space-x-2">
+            <button
+              onClick={handlePrint}
+              className="px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600"
+            >
+              Imprimer
+            </button>
+
+            {canDelete() && (
+              <button
+                onClick={handleDelete}
+                className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600"
+              >
+                Supprimer
+              </button>
+            )}
+
+            {canEdit() && (
+              <button
+                onClick={() => navigate(`/fdp/edit/${id}`)}
+                className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600"
+              >
+                Modifier
+              </button>
+            )}
+          </div>
+        </div>
+
+        {fdp.status === FDPStatus.REJECTED && (
+          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+            <p className="font-bold">Demande rejetée</p>
+            <p>Raison: {fdp.rejection_reason}</p>
+            <p>Rejetée par: {fdp.rejected_by}</p>
+            <p>Date: {fdp.rejection_date}</p>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+          <div>
+            <h2 className="text-lg font-semibold mb-2">
+              Informations générales
+            </h2>
+            <div className="bg-gray-50 p-4 rounded-md">
+              <p>
+                <strong>FICHE D':</strong> {fdp.type_description}
+              </p>
+              <p>
+                <strong>Date de création:</strong>{" "}
+                {format(new Date(fdp.creation_date), "dd/MM/yyyy")}
+              </p>
+              <p>
+                <strong>Statut:</strong> {getStatusLabel(fdp.status)}
+              </p>
+              <p>
+                <strong>Référence:</strong> {fdp.reference}
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <h2 className="text-lg font-semibold mb-2">Demandeur</h2>
+            <div className="bg-gray-50 p-4 rounded-md">
+              <p>
+                <strong>Nom:</strong> {fdp.requester_name}
+              </p>
+              <p>
+                <strong>Poste:</strong> {fdp.requester_position}
+              </p>
+              <p>
+                <strong>Département:</strong> {fdp.requester_department}
+              </p>
+              <p>
+                <strong>Email:</strong> {fdp.requester_email}
+              </p>
+              <p>
+                <strong>Téléphone:</strong> {fdp.requester_phone}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mb-6">
+          <h2 className="text-lg font-semibold mb-2">
+            Description de la demande
+          </h2>
+          <div className="bg-gray-50 p-4 rounded-md">
+            <p>{fdp.description}</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+          <div>
+            <h2 className="text-lg font-semibold mb-2">Montant</h2>
+            <div className="bg-gray-50 p-4 rounded-md">
+              <p>
+                <strong>Montant demandé:</strong> {fdp.amount || "Non spécifié"}
+              </p>
+              <p>
+                <strong>Montant validé:</strong>{" "}
+                {fdp.validated_amount || "Non spécifié"}
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <h2 className="text-lg font-semibold mb-2">Mode de paiement</h2>
+            <div className="bg-gray-50 p-4 rounded-md">
+              <p>
+                {fdp.payment_method
+                  ? fdp.payment_method.replace("_", " ")
+                  : "Non spécifié"}
+              </p>
+              {fdp.payment_reference && (
+                <p>
+                  <strong>Référence:</strong> {fdp.payment_reference}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <h2 className="text-lg font-semibold mb-2">Départements</h2>
+            <div className="bg-gray-50 p-4 rounded-md">
+              <p>
+                <strong>Source:</strong> {fdp.department_source}
+              </p>
+              <p>
+                <strong>Destination:</strong>{" "}
+                {fdp.department_destination?.join(", ") || "Non spécifié"}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mb-6">
+          <h2 className="text-lg font-semibold mb-2">Signatures</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <SignatureBox
+              title="Demandeur"
+              signature={fdp.requester_signature}
+              date={fdp.requester_signature_date}
+            />
+
+            <SignatureBox
+              title="Opérations"
+              signature={fdp.operations_signature}
+              date={fdp.operations_signature_date}
+            />
+
+            <SignatureBox
+              title="Fournisseur"
+              signature={fdp.fournisseur_signature}
+              date={fdp.fournisseur_signature_date}
+              optional
+            />
+
+            <SignatureBox
+              title="Supérieur hiérarchique"
+              signature={fdp.superieur_hierarchique_signature}
+              date={fdp.superieur_hierarchique_signature_date}
+            />
+
+            <SignatureBox
+              title="Trésorerie"
+              signature={fdp.tresorerie_signature}
+              date={fdp.tresorerie_signature_date}
+            />
+
+            <SignatureBox
+              title="Comptabilité"
+              signature={fdp.comptabilite_signature}
+              date={fdp.comptabilite_signature_date}
+            />
+
+            <SignatureBox
+              title="Directeur Général"
+              signature={fdp.directeur_general_signature}
+              date={fdp.directeur_general_signature_date}
+            />
+
+            <SignatureBox
+              title="Caisse"
+              signature={fdp.caisse_signature}
+              date={fdp.caisse_signature_date}
+            />
+          </div>
+        </div>
+
+        {canSign() && (
+          <div className="border border-gray-300 rounded-md p-4 mb-6">
+            <h2 className="text-lg font-semibold mb-4">Action requise</h2>
+
+            {user?.role === UserRole.DIRECTEUR_GENERAL && (
+              <div className="mb-4">
+                <label className="block text-gray-700 mb-2">
+                  Montant validé *{" "}
+                  <span className="text-sm text-gray-500">
+                    (nombre entier sans décimales)
+                  </span>
+                </label>
+                <input
+                  type="text"
+                  value={validatedAmount}
+                  onChange={(e) => {
+                    const rawValue = e.target.value;
+                    // Autoriser uniquement les chiffres
+                    const cleanedValue = rawValue.replace(/[^0-9]/g, "");
+                    setValidatedAmount(cleanedValue);
+
+                    // Vérification en temps réel
+                    if (cleanedValue === "") {
+                      setError("Le montant validé est requis");
+                    } else if (!/^\d+$/.test(cleanedValue)) {
+                      setError(
+                        "Seuls les chiffres entiers sont autorisés (ex: 250000)"
+                      );
+                    } else {
+                      setError(null);
+                    }
+                  }}
+                  className={`w-full p-2 border rounded-md ${
+                    error ? "border-red-500" : "border-gray-300"
+                  }`}
+                  placeholder="Exemple: 150000"
+                />
+                {error && (
+                  <div className="mt-2 p-2 bg-red-50 border border-red-200 text-red-700 rounded-md flex items-center">
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      className="h-5 w-5 mr-2"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                    {error}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {user?.role === UserRole.OPERATIONS && (
+              <div className="mb-4">
+                <p className="text-sm text-gray-600 mb-2">
+                  En tant qu'Opérations, vous devez spécifier le montant de la
+                  demande.
+                </p>
+              </div>
+            )}
+
+            {!showRejectionForm ? (
+              <>
+                <div className="mb-4">
+                  <label className="block text-gray-700 mb-2">
+                    Votre signature
+                  </label>
+                  <SignatureCanvas onSave={setSignature} />
+                </div>
+                <div className="flex justify-end space-x-2">
+                  <button
+                    onClick={() => setShowRejectionForm(true)}
+                    className="px-4 py-2 bg-yellow-500 text-white rounded-md hover:bg-yellow-600"
+                  >
+                    Rejeter
+                  </button>
+
+                  <button
+                    onClick={() => handleSign(true)}
+                    disabled={!signature || signingInProgress}
+                    className={`px-4 py-2 rounded-md ${
+                      !signature || signingInProgress
+                        ? "bg-gray-300 cursor-not-allowed"
+                        : "bg-green-500 hover:bg-green-600 text-white"
+                    }`}
+                  >
+                    {signingInProgress
+                      ? "Traitement..."
+                      : "Approuver et signer"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="mb-4">
+                  <label className="block text-gray-700 mb-2">
+                    Raison du rejet
+                  </label>
+                  <textarea
+                    value={rejectionReason}
+                    onChange={(e) => setRejectionReason(e.target.value)}
+                    className="w-full p-2 border border-gray-300 rounded-md"
+                    rows={3}
+                    placeholder="Expliquez pourquoi vous rejetez cette demande"
+                  />
+                </div>
+
+                <div className="flex justify-end space-x-2">
+                  <button
+                    onClick={() => setShowRejectionForm(false)}
+                    className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400"
+                  >
+                    Annuler
+                  </button>
+
+                  <button
+                    onClick={() => handleSign(false)}
+                    disabled={!rejectionReason || signingInProgress}
+                    className={`px-4 py-2 rounded-md ${
+                      !rejectionReason || signingInProgress
+                        ? "bg-gray-300 cursor-not-allowed"
+                        : "bg-red-500 hover:bg-red-600 text-white"
+                    }`}
+                  >
+                    {signingInProgress ? "Traitement..." : "Confirmer le rejet"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Hidden printable version */}
+        <div className="hidden">
+          <div ref={printRef} className="p-8 bg-white">
+            <FDPPrintView data={fdp} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Helper components
+const SignatureBox: React.FC<{
+  title: string;
+  signature: string | null;
+  date: string | null;
+  optional?: boolean;
+}> = ({ title, signature, date, optional = false }) => {
+  return (
+    <div className="border border-gray-300 rounded-md p-3">
+      <h3 className="font-medium mb-2">
+        {title} {optional && <span className="text-sm text-gray-500"></span>}
+      </h3>
+
+      {signature ? (
+        <>
+          <div className="h-20 flex items-center justify-center bg-gray-50 mb-2">
+            <img
+              src={signature}
+              alt={`Signature ${title}`}
+              className="max-h-full max-w-full object-contain"
+            />
+          </div>
+          {date && (
+            <p className="text-sm text-gray-600">
+              Signé le {format(new Date(date), "dd/MM/yyyy")}
+            </p>
+          )}
+        </>
+      ) : (
+        <div className="h-20 flex items-center justify-center bg-gray-50 text-gray-400 text-sm">
+          En attente de signature
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Printable view component
+const FDPPrintView: React.FC<{ data: FDP }> = ({ data }) => {
+  return (
+    <div className="max-w-4xl mx-auto border border-gray-300 p-6">
+      <h1 className="text-xl font-bold text-center mb-2">
+        {data.type_description}
+      </h1>
+      <p className="text-center mb-6">Référence: {data.reference}</p>
+
+      <div className="grid grid-cols-2 gap-6 mb-6">
+        <div className="border border-gray-300 p-4">
+          <p className="mb-2">
+            <strong>Date:</strong>{" "}
+            {format(new Date(data.creation_date), "dd/MM/yyyy")}
+          </p>
+          <p className="mb-2">
+            <strong>Poste:</strong> {data.requester_position}
+          </p>
+          <p>
+            <strong>Nom et prénoms:</strong> {data.requester_name}
+          </p>
+        </div>
+
+        <div className="border border-gray-300 p-4">
+          <p className="text-center mb-2">
+            <em>(cocher la case correspondante)</em>
+          </p>
+          <table className="w-full">
+            <thead>
+              <tr>
+                <th className="text-left">Direction / Service</th>
+                <th>demandeur</th>
+                <th>destinataire</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                "Direction Générale",
+                "Technique",
+                "Commercial",
+                "Opérations",
+                "Comptabilité",
+              ].map((dept) => (
+                <tr key={dept}>
+                  <td>{dept}</td>
+                  <td className="text-center">
+                    {data.department_source === dept ? "✓" : "□"}
+                  </td>
+                  <td className="text-center">
+                    {(data.department_destination || []).includes(dept)
+                      ? "✓"
+                      : "□"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="border border-gray-300 p-4 mb-6">
+        <div className="flex justify-between mb-2">
+          <p>
+            <strong>Montant:</strong> {data.amount || ""}
+          </p>
+          <p>{data.payment_reference || ""}</p>
+        </div>
+        <div>
+          <p className="font-bold mb-2">DESCRIPTION</p>
+          <p>{data.description}</p>
+        </div>
+      </div>
+
+      <div className="mb-6">
+        <p className="text-center font-bold mb-2">
+          VALIDATION (Date et Signature)
+        </p>
+        <div className="grid grid-cols-5 gap-2">
+          <div className="border border-gray-300 p-2 text-center">
+            <p className="font-bold mb-2">Demandeur</p>
+            {data.requester_signature ? (
+              <img
+                src={data.requester_signature}
+                alt="Signature"
+                className="h-16 mx-auto"
+              />
+            ) : (
+              <p className="text-sm italic">En attente de signature</p>
+            )}
+            <p className="text-sm mt-2">
+              {data.requester_signature_date
+                ? format(new Date(data.requester_signature_date), "dd/MM/yyyy")
+                : ""}
+            </p>
+          </div>
+
+          <div className="border border-gray-300 p-2 text-center">
+            <p className="font-bold mb-2">Supérieur hiérarchique</p>
+            {data.superieur_hierarchique_signature ? (
+              <img
+                src={data.superieur_hierarchique_signature}
+                alt="Signature"
+                className="h-16 mx-auto"
+              />
+            ) : (
+              <p className="text-sm italic">En attente de signature</p>
+            )}
+            <p className="text-sm mt-2">
+              {data.superieur_hierarchique_signature_date
+                ? format(
+                    new Date(data.superieur_hierarchique_signature_date),
+                    "dd/MM/yyyy"
+                  )
+                : ""}
+            </p>
+          </div>
+
+          <div className="border border-gray-300 p-2 text-center">
+            <p className="font-bold mb-2">Opérations</p>
+            {data.operations_signature ? (
+              <img
+                src={data.operations_signature}
+                alt="Signature"
+                className="h-16 mx-auto"
+              />
+            ) : (
+              <p className="text-sm italic"></p>
+            )}
+            <p className="text-sm mt-2">
+              {data.operations_signature_date
+                ? format(new Date(data.operations_signature_date), "dd/MM/yyyy")
+                : ""}
+            </p>
+          </div>
+
+          <div className="border border-gray-300 p-2 text-center">
+            <p className="font-bold mb-2">Fournisseur</p>
+            {data.fournisseur_signature ? (
+              <img
+                src={data.fournisseur_signature}
+                alt="Signature"
+                className="h-16 mx-auto"
+              />
+            ) : (
+              <p className="text-sm italic"></p>
+            )}
+            <p className="text-sm mt-2">
+              {data.fournisseur_signature_date
+                ? format(
+                    new Date(data.fournisseur_signature_date),
+                    "dd/MM/yyyy"
+                  )
+                : ""}
+            </p>
+          </div>
+
+          <div className="border border-gray-300 p-2 text-center">
+            <p className="font-bold mb-2">Trésorerie</p>
+            {data.tresorerie_signature ? (
+              <img
+                src={data.tresorerie_signature}
+                alt="Signature"
+                className="h-16 mx-auto"
+              />
+            ) : (
+              <p className="text-sm italic">En attente de signature</p>
+            )}
+            <p className="text-sm mt-2">
+              {data.tresorerie_signature_date
+                ? format(new Date(data.tresorerie_signature_date), "dd/MM/yyyy")
+                : ""}
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-4 gap-2 mt-2">
+          {/* Comptabilité */}
+          <div className="border border-gray-300 p-2 text-center">
+            <p className="font-bold mb-2">Comptabilité</p>
+            {data.comptabilite_signature ? (
+              <img
+                src={data.comptabilite_signature}
+                alt="Signature"
+                className="h-16 mx-auto"
+              />
+            ) : (
+              <p className="text-sm italic">En attente de signature</p>
+            )}
+            <p className="text-sm mt-2">
+              {data.comptabilite_signature_date
+                ? format(
+                    new Date(data.comptabilite_signature_date),
+                    "dd/MM/yyyy"
+                  )
+                : ""}
+            </p>
+          </div>
+
+          {/* Directeur Général */}
+          <div className="border border-gray-300 p-2 text-center">
+            <p className="font-bold mb-2">Directeur Général</p>
+            {data.directeur_general_signature ? (
+              <img
+                src={data.directeur_general_signature}
+                alt="Signature"
+                className="h-16 mx-auto"
+              />
+            ) : (
+              <p className="text-sm italic">En attente de signature</p>
+            )}
+            <p className="text-sm mt-2">
+              {data.directeur_general_signature_date
+                ? format(
+                    new Date(data.directeur_general_signature_date),
+                    "dd/MM/yyyy"
+                  )
+                : ""}
+            </p>
+          </div>
+
+          {/* Caisse */}
+          <div className="border border-gray-300 p-2 text-center">
+            <p className="font-bold mb-2">Caisse</p>
+            {data.caisse_signature ? (
+              <img
+                src={data.caisse_signature}
+                alt="Signature"
+                className="h-16 mx-auto"
+              />
+            ) : (
+              <p className="text-sm italic">En attente de signature</p>
+            )}
+            <p className="text-sm mt-2">
+              {data.caisse_signature_date
+                ? format(new Date(data.caisse_signature_date), "dd/MM/yyyy")
+                : ""}
+            </p>
+          </div>
+
+          {/* Montant validé */}
+          <div className="border border-gray-300 p-2 text-center">
+            <p className="font-bold mb-2">Montant validé</p>
+            <p className="text-xl font-bold">
+              {data.validated_amount || "FCFA"}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mb-2 text-right">
+        <p className="text-sm italic">(réservé à la comptabilité)</p>
+      </div>
+
+      <table className="w-full border-collapse">
+        <thead>
+          <tr>
+            <th className="border border-gray-300 p-2 text-left">
+              mode de paiement
+            </th>
+            <th className="border border-gray-300 p-2 text-center">
+              cocher la case
+            </th>
+            <th className="border border-gray-300 p-2 text-left">référence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(data.payment_method
+            ? typeof data.payment_method === "string"
+              ? [data.payment_method as string]
+              : (Object.values(data.payment_method) as string[])
+            : []
+          ).map((method: string) => (
+            <tr key={method}>
+              <td className="border border-gray-300 p-2">
+                {method.replace("_", " ")}
+              </td>
+              <td className="border border-gray-300 p-2 text-center">
+                {data.payment_method === method ? "●" : "○"}
+              </td>
+              <td className="border border-gray-300 p-2">
+                {data.payment_method === method ? data.payment_reference : ""}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+// Helper function to get status label
+const getStatusLabel = (status: FDPStatus): string => {
+  switch (status) {
+    case FDPStatus.DRAFT:
+      return "Brouillon";
+    //case FDPStatus.PENDING_OPERATIONS:
+    //return "En attente de signature (Opérations)";
+    //case FDPStatus.PENDING_FOURNISSEUR:
+    //return "En attente de signature (Fournisseur)";
+    case FDPStatus.PENDING_CHEF_SERVICE:
+      return "En attente de signature (Supérieur hierarchique)";
+    case FDPStatus.PENDING_RESPONSABLE_FINANCIER:
+      return "En attente de signature (Trésorerie)";
+    case FDPStatus.PENDING_RESPONSABLE_COMPTABLE:
+      return "En attente de signature (Comptabilité)";
+    case FDPStatus.PENDING_DIRECTEUR_GENERAL:
+      return "En attente de signature (Directeur Général)";
+    case FDPStatus.PENDING_CAISSE:
+      return "En attente de signature (Caisse)";
+    case FDPStatus.COMPLETED:
+      return "Complétée";
+    case FDPStatus.REJECTED:
+      return "Rejetée";
+    default:
+      return "Inconnu";
+  }
+};
+
+export default FDPDetail;
+
+
+----
+src/components/FDFPForm.tsx
+import React, { useState, useRef, useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { useNavigate, useParams } from "react-router-dom";
+import { format } from "date-fns";
+import { useReactToPrint } from "react-to-print";
+import SignatureCanvas from "./SignatureCanvas";
+import PrintableFDP from "./PrintableFDP";
+import { FDP, PaymentMethod, FDPStatus } from "../types";
+import { useAuth } from "../context/AuthContext";
+import { createFDP, updateFDP, getFDP } from "../api";
+
+interface FDPFormProps {
+  isEditing?: boolean;
+}
+
+const FDPForm: React.FC<FDPFormProps> = ({ isEditing = false }) => {
+  const { id } = useParams<{ id?: string }>();
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [signature, setSignature] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const printRef = useRef<HTMLDivElement>(null);
+
+  const {
+    register,
+    handleSubmit,
+    watch,
+    reset,
+    formState: { errors },
+  } = useForm<Partial<FDP>>({
+    defaultValues: {
+      creation_date: format(new Date(), "yyyy-MM-dd"),
+      payment_method: PaymentMethod.VIREMENT,
+      department_source: user?.department || "Direction Générale",
+      department_destination: [],
+      amount: null,
+      validated_amount: null,
+    },
+  });
+
+  const departments = [
+    "Direction Générale",
+    "Technique",
+    "Commercial",
+    "Opérations",
+    "Comptabilité",
+    "Administration",
+    "Autres",
+  ];
+
+  const type_descr = [
+    "Expression de besoin + Demande de paiement",
+    "Expression de besoin",
+    "Autres",
+  ];
+
+  const formData = watch();
+  const creationDate = formData.creation_date 
+    ? new Date(formData.creation_date) 
+    : new Date();
+
+  useEffect(() => {
+    const loadFDPData = async () => {
+      if (isEditing && id) {
+        try {
+          const data = await getFDP(parseInt(id));
+          reset(data);
+          setSignature(data.requester_signature);
+        } catch (err) {
+          setError("Erreur lors du chargement de la fiche");
+        }
+      }
+    };
+
+    loadFDPData();
+  }, [id, isEditing, reset]);
+
+  const handlePrint = useReactToPrint({
+    content: () => printRef.current,
+    pageStyle: `
+      @page {
+        size: A4;
+        margin: 5mm;
+      }
+      @media print {
+        html, body {
+          zoom: 0.9;
+          margin: 0;
+          padding: 0;
+        }
+        .print-container {
+          transform: scale(0.9);
+          transform-origin: top left;
+          width: 100%;
+        }
+      }
+    `,
+  });
+
+  const onSubmit = async (data: Partial<FDP>) => {
+    if (!user || !signature) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const fdpData: Partial<FDP> = {
+        ...data,
+        requester_id: user.id,
+        requester_name: user.fullName,
+        requester_position: user.position,
+        requester_department: user.department,
+        requester_phone: user.phoneNumber,
+        requester_email: user.email,
+        requester_signature: signature,
+        requester_signature_date: format(new Date(), "yyyy-MM-dd"),
+        status: isEditing ? data.status : FDPStatus.PENDING_OPERATIONS,
+      };
+
+      if (isEditing && id) {
+        await updateFDP(parseInt(id), fdpData);
+        navigate(`/fdp/${id}`);
+      } else {
+        const tempReference = `TEMP-${format(creationDate, "ddMMyyyy")}-F`;
+        const newFdp = await createFDP({
+          ...fdpData,
+          reference: tempReference,
+        });
+
+        const finalReference = `${newFdp.id} - ${format(
+          creationDate,
+          "dd/MM/yyyy"
+        )} - F`;
+        await updateFDP(newFdp.id, { ...newFdp, reference: finalReference });
+
+        navigate(`/fdp/${newFdp.id}`);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Une erreur est survenue");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="container mx-auto px-4 py-8">
+      <div className="bg-white rounded-lg shadow-md p-6">
+        <h1 className="text-2xl font-bold mb-6 text-center">
+          {isEditing ? "Modifier la Fiche" : "Nouvelle Fiche"}
+        </h1>
+
+        {error && (
+          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
+          <div>
+            <label className="block text-gray-700 mb-2">
+              Selectionner le type de fiche
+            </label>
+            <select
+              {...register("type_description", {
+                required: "Le type de fiche est requis",
+              })}
+              className="w-full p-2 border border-gray-300 rounded-md"
+            >
+              {type_descr.map((dept) => (
+                <option key={dept} value={dept}>
+                  {dept}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label className="block text-gray-700 mb-2">Date</label>
+              <input
+                type="date"
+                {...register("creation_date", {
+                  required: "La date est requise",
+                })}
+                className="w-full p-2 border border-gray-300 rounded-md"
+              />
+              {errors.creation_date && (
+                <p className="text-red-500 text-sm mt-1">
+                  {errors.creation_date.message}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-gray-700 mb-2">Description</label>
+              <input
+                type="text"
+                {...register("description", {
+                  required: "La description est requise",
+                })}
+                className="w-full p-2 border border-gray-300 rounded-md"
+                placeholder="Objet de la demande"
+              />
+              {errors.description && (
+                <p className="text-red-500 text-sm mt-1">
+                  {errors.description.message}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-gray-700 mb-2">
+              Département source
+            </label>
+            <select
+              {...register("department_source", {
+                required: "Le département source est requis",
+              })}
+              className="w-full p-2 border border-gray-300 rounded-md"
+            >
+              {departments.map((dept) => (
+                <option key={dept} value={dept}>
+                  {dept}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-gray-700 mb-2">
+              Départements destinataires
+            </label>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+              {departments.map((dept) => (
+                <label key={dept} className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    value={dept}
+                    {...register("department_destination")}
+                    className="form-checkbox h-4 w-4 text-blue-600"
+                  />
+                  <span>{dept}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-gray-700 mb-2">Montant</label>
+            <input
+              type="number"
+              step="0.01"
+              {...register("amount", {
+                valueAsNumber: true,
+              })}
+              className="w-full p-2 border border-gray-300 rounded-md"
+              placeholder="Montant de la demande"
+            />
+          </div>
+
+          <div>
+            <label className="block text-gray-700 mb-2">Mode de paiement</label>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+              {Object.entries(PaymentMethod).map(([key, value]) => (
+                <label key={key} className="flex items-center space-x-2">
+                  <input
+                    type="radio"
+                    value={value}
+                    {...register("payment_method", {
+                      required: "Le mode de paiement est requis",
+                    })}
+                    className="form-radio h-4 w-4 text-blue-600"
+                  />
+                  <span>{value.replace(/_/g, " ")}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-gray-700 mb-2">
+              Référence de paiement
+            </label>
+            <input
+              type="text"
+              {...register("payment_reference")}
+              className="w-full p-2 border border-gray-300 rounded-md"
+              placeholder="Numéro de facture, référence, etc."
+            />
+          </div>
+
+          <div>
+            <label className="block text-gray-700 mb-2">Signature</label>
+            <SignatureCanvas
+              onSave={setSignature}
+              initialSignature={signature}
+            />
+            {!signature && (
+              <p className="text-red-500 text-sm mt-1">
+                La signature est requise
+              </p>
+            )}
+          </div>
+
+          <div className="flex justify-between pt-6">
+            <button
+              type="button"
+              onClick={() => navigate("/dashboard")}
+              className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400"
+            >
+              Annuler
+            </button>
+
+            <div className="space-x-2">
+              <button
+                type="button"
+                onClick={handlePrint}
+                className="px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600"
+              >
+                Aperçu
+              </button>
+
+              <button
+                type="submit"
+                disabled={loading || !signature}
+                className={`px-4 py-2 rounded-md ${
+                  loading || !signature
+                    ? "bg-blue-300 cursor-not-allowed"
+                    : "bg-blue-500 hover:bg-blue-600 text-white"
+                }`}
+              >
+                {loading
+                  ? "Traitement..."
+                  : isEditing
+                  ? "Mettre à jour"
+                  : "Soumettre"}
+              </button>
+            </div>
+          </div>
+        </form>
+
+        <div className="hidden">
+          <div ref={printRef}>
+            <PrintableFDP
+              data={{
+                ...(formData as FDP),
+                requester_signature: signature,
+                requester_name: user?.fullName || "",
+                requester_position: user?.position || "",
+                reference:
+                  formData.reference || `TEMP-${format(creationDate, "ddMMyyyy")}-F`,
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default FDPForm;
+
+----
+src/components/PrintableFDP.tsx
+import React from "react";
+import { format } from "date-fns";
+import { FDP, PaymentMethod } from "../types";
+
+interface PrintableFDPProps {
+  data: FDP;
+}
+
+const PrintableFDP: React.FC<PrintableFDPProps> = ({ data }) => {
+  const departments = [
+    "Direction Générale",
+    "Technique",
+    "Commercial",
+    "Opérations",
+    "Comptabilité",
+    "Administration",
+    "Autres",
+  ];
+
+  const paymentMethods = [
+    { id: PaymentMethod.VIREMENT, label: "Virement" },
+    { id: PaymentMethod.CHEQUE_BARRE, label: "Chèque barré" },
+    { id: PaymentMethod.CHEQUE_NON_BARRE, label: "Chèque non barré" },
+    { id: PaymentMethod.ESPECES, label: "Espèces" },
+    { id: PaymentMethod.MONNAIE_ELECTRONIQUE, label: "E-monnaie" },
+    { id: PaymentMethod.AUTRE, label: "Autre" },
+  ];
+
+  return (
+    <div className="print-container w-[210mm] min-h-[297mm] bg-white p-4 text-black text-xs">
+      {/* Header */}
+      <div className="text-center mb-2">
+        <h1 className="text-sm font-bold uppercase">Vipnet Fiche</h1>
+        
+        <p className="text-xs">
+          Réf: {data.reference?.replace("TEMP-", "") || "Nouvelle"}
+        </p>
+      </div>
+
+      {/* Main content */}
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        {/* Left column */}
+        <div className="border border-gray-300 p-1">
+          <div className="mb-1">
+            <p className="text-xs">
+              <span className="font-semibold">Date:</span>{" "}
+              {format(new Date(data.creation_date), "dd/MM/yy")}
+            </p>
+          </div>
+          <div className="mb-1">
+            <p className="text-xs">
+              <span className="font-semibold">Poste:</span>{" "}
+              {data.requester_position}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs">
+              <span className="font-semibold">Nom:</span> {data.requester_name}
+            </p>
+          </div>
+        </div>
+
+        {/* Right column - Departments */}
+        <div className="border border-gray-300 p-1">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="h-6">
+                <th className="text-left p-0.5">Service</th>
+                <th className="w-6 text-center">D</th>
+                <th className="w-6 text-center">R</th>
+              </tr>
+            </thead>
+            <tbody>
+              {departments.map((dept) => (
+                <tr key={dept} className="h-5">
+                  <td className="p-0.5">{dept}</td>
+                  <td className="text-center">
+                    {data.department_source === dept ? "✓" : ""}
+                  </td>
+                  <td className="text-center">
+                    {data.department_destination.includes(dept) ? "✓" : ""}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Description */}
+      <div className="border border-gray-300 p-1 mb-2">
+        <div className="flex justify-between mb-1">
+          <p className="text-xs">
+            <span className="font-semibold">Montant:</span> {data.amount} €
+          </p>
+          <p className="text-xs">
+            <span className="font-semibold">Réf:</span> {data.payment_reference}
+          </p>
+        </div>
+        <div>
+          <p className="font-semibold text-xs mb-0.5">Description</p>
+          <p className="text-xs">{data.description}</p>
+        </div>
+      </div>
+
+      {/* Signatures */}
+      <div className="mb-2">
+        <p className="text-center font-semibold text-xs mb-1">VALIDATION</p>
+        <div className="grid grid-cols-5 gap-1">
+          <SignatureBox
+            title="Demandeur"
+            signature={data.requester_signature}
+            date={data.requester_signature_date}
+          />
+          <SignatureBox
+            title="Manager"
+            signature={data.superieur_hierarchique_signature}
+            date={data.superieur_hierarchique_signature_date}
+          />
+          <SignatureBox
+            title="Opérations"
+            signature={data.operations_signature}
+            date={data.operations_signature_date}
+          />
+          <SignatureBox
+            title="Fournisseur"
+            signature={data.operations_signature}
+            date={data.operations_signature_date}
+          />
+          <SignatureBox
+            title="Trésorerie"
+            signature={data.tresorerie_signature}
+            date={data.tresorerie_signature_date}
+          />
+          <SignatureBox
+            title="Comptabilité"
+            signature={data.comptabilite_signature}
+            date={data.comptabilite_signature_date}
+          />
+        </div>
+
+        <div className="grid grid-cols-3 gap-1 mt-1">
+          <SignatureBox
+            title="DG"
+            signature={data.directeur_general_signature}
+            date={data.directeur_general_signature_date}
+          />
+          <div className="border border-gray-300 p-0.5">
+            <p className="font-semibold text-center text-xs mb-0.5">Montant validé</p>
+            <p className="text-center text-sm">{data.validated_amount || "FCFA"} €</p>
+          </div>
+          <SignatureBox
+            title="Caisse"
+            signature={data.caisse_signature}
+            date={data.caisse_signature_date}
+          />
+        </div>
+      </div>
+
+      {/* Payment */}
+      <div>
+        <table className="w-full border-collapse text-xs">
+          <thead>
+            <tr className="h-6">
+              <th className="border border-gray-300 p-0.5 text-left">Paiement</th>
+              <th className="border border-gray-300 p-0.5 w-6 text-center">✓</th>
+              <th className="border border-gray-300 p-0.5 text-left">Réf</th>
+            </tr>
+          </thead>
+          <tbody>
+            {paymentMethods.map((method) => (
+              <tr key={method.id} className="h-5">
+                <td className="border border-gray-300 p-0.5">{method.label}</td>
+                <td className="border border-gray-300 p-0.5 text-center">
+                  {data.payment_method === method.id ? "✓" : ""}
+                </td>
+                <td className="border border-gray-300 p-0.5">
+                  {data.payment_method === method.id ? data.payment_reference : ""}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+const SignatureBox: React.FC<{
+  title: string;
+  signature: string | null;
+  date: string | null;
+}> = ({ title, signature, date }) => (
+  <div className="border border-gray-300 p-0.5 h-16">
+    <p className="font-semibold text-center text-xs mb-0.5">{title}</p>
+    <div className="h-8 flex items-center justify-center">
+      {signature ? (
+        <img src={signature} alt="Signature" className="max-h-full max-w-full" />
+      ) : (
+        <span className="text-gray-400 text-2xs">Signature</span>
+      )}
+    </div>
+    {date && (
+      <p className="text-center text-2xs mt-0.5">
+        {format(new Date(date), "dd/MM/yy")}
+      </p>
+    )}
+  </div>
+);
+
+export default PrintableFDP;
+
+
+----
+src/types/index.ts
+export interface User {
+  id: number;
+  username: string;
+  email: string;
+  password: string;
+  role: UserRole;
+  fullName: string;
+  position: string;
+  department: string;
+  phoneNumber: string;
+  token: string;
+}
+
+export enum UserRole {
+  ADMIN = "admin",
+  DEMANDEUR = "demandeur",
+  OPERATIONS = "operations",
+  FOURNISSEUR = "fournisseur",
+  CHEF_SERVICE = "superieur_hierarchique",
+  RESPONSABLE_FINANCIER = "tresorerie",
+  RESPONSABLE_COMPTABLE = "comptabilite",
+  DIRECTEUR_GENERAL = "directeur_general",
+  CAISSE = "caisse",
+  CONTROLE_QUALITE = "Controle_Qualite",
+  CONTROLE_GESTION = "Controle_Gestion",
+  MAGASINIER = "Magasinier"
+}
+
+
+export enum FDPStatus {
+  DRAFT = "draft",
+  PENDING_OPERATIONS = "pending_operations",
+  PENDING_CHEF_SERVICE = "pending_superieur_hierarchique",
+  PENDING_RESPONSABLE_FINANCIER = "pending_tresorerie",
+  PENDING_RESPONSABLE_COMPTABLE = "pending_comptabilite",
+  PENDING_DIRECTEUR_GENERAL = "pending_directeur_general",
+  PENDING_CAISSE = "pending_caisse",
+  COMPLETED = "completed",
+  REJECTED = "rejected",
+   PENDING = "pending",  // Add this line
+}
+
+export enum PaymentMethod {
+  VIREMENT = "virement_bancaire",
+  CHEQUE_BARRE = "chèque_barré",
+  CHEQUE_NON_BARRE = "chèque_non_barré",
+  ESPECES = "espèces",
+  MONNAIE_ELECTRONIQUE = "monnaie_électronique",
+  AUTRE = "autre",
+}
+
+export interface Department {
+  id: string;
+  name: string;
+}
+
+export interface FDP {
+  id: number;
+  reference: string;
+  creation_date: string;
+  requester_id: number;
+  requester_name: string;
+  requester_position: string;
+  type_description: string;
+  requester_department: string;
+  requester_phone: string;
+  requester_email: string;
+  description: string;
+  amount: number | null;
+  validated_amount: number | null;
+  payment_method: PaymentMethod;
+  payment_reference: string;
+  status: FDPStatus;
+
+  // Signatures
+  requester_signature: string | null; // <- snake_case
+  operations_signature: string | null;
+  fournisseur_signature: string | null;
+  superieur_hierarchique_signature: string | null;
+  tresorerie_signature: string | null;
+  comptabilite_signature: string | null;
+  directeur_general_signature: string | null;
+  caisse_signature: string | null;
+
+  // Dates de signature
+  requester_signature_date: string | null; // <- snake_case
+  operations_signature_date: string | null;
+  fournisseur_signature_date: string | null;
+  superieur_hierarchique_signature_date: string | null;
+  tresorerie_signature_date: string | null;
+  comptabilite_signature_date: string | null;
+  directeur_general_signature_date: string | null;
+  caisse_signature_date: string | null;
+
+  // Rejet
+  rejection_reason: string | null;
+  rejected_by: string | null;
+  rejection_date: string | null;
+
+  // Départements
+  department_source: string;
+  department_destination: string[];
+}
+
+export interface SignatureAction {
+  fdpId: number;
+  signature: string;
+  role: UserRole;
+  approved: boolean;
+  rejectionReason?: string;
+  validatedAmount?: number;
+  selectedRole?: UserRole; 
+}
+
+
+src/context/AuthContext.tsx
+---
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  ReactNode,
+} from "react";
+import { User, UserRole } from "../types";
+
+interface AuthContextType {
+  user: User | null;
+  loading: boolean;
+  login: (userData: User) => Promise<void>;
+  logout: () => void;
+  isAuthenticated: boolean;
+  hasRole: (role: UserRole) => boolean;
+  getToken: () => string;
+  refreshUserData: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Vérifie la validité du token
+  const validateToken = (token: string): boolean => {
+    if (!token) return false;
+    try {
+      // Décodage basique du token pour vérifier l'expiration
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      return payload.exp * 1000 > Date.now();
+    } catch {
+      return false;
+    }
+  };
+
+  // Charge et valide l'utilisateur au démarrage
+  useEffect(() => {
+    const initializeAuth = async () => {
+      try {
+        const storedUser = localStorage.getItem("user");
+        if (storedUser) {
+          const userData = JSON.parse(storedUser);
+          
+          if (userData.token && validateToken(userData.token)) {
+            setUser(userData);
+          } else {
+            localStorage.removeItem("user");
+          }
+        }
+      } catch (error) {
+        console.error("Failed to initialize auth:", error);
+        localStorage.removeItem("user");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    initializeAuth();
+  }, []);
+
+  // Connexion avec validation
+  const login = async (userData: User) => {
+    if (!userData.token) {
+      throw new Error("Token manquant dans la réponse du serveur");
+    }
+
+    const userWithToken = {
+      ...userData,
+      token: userData.token
+    };
+
+    localStorage.setItem("user", JSON.stringify(userWithToken));
+    setUser(userWithToken);
+  };
+
+  // Déconnexion avec nettoyage complet
+  const logout = () => {
+    setUser(null);
+    localStorage.removeItem("user");
+    // Ajoutez ici d'autres nettoyages si nécessaire
+  };
+
+  // Récupération sécurisée du token
+  const getToken = (): string => {
+    if (user?.token && validateToken(user.token)) {
+      return user.token;
+    }
+
+    const storedUser = localStorage.getItem("user");
+    if (storedUser) {
+      try {
+        const userData = JSON.parse(storedUser);
+        if (userData.token && validateToken(userData.token)) {
+          return userData.token;
+        }
+      } catch (error) {
+        console.error("Token invalide:", error);
+      }
+    }
+    
+    logout(); // Déconnecte si le token est invalide
+    return "";
+  };
+
+  // Rafraîchissement des données utilisateur
+  const refreshUserData = async () => {
+    const token = getToken();
+    if (!token) return;
+
+    try {
+      const response = await fetch("/api/auth/me", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (response.ok) {
+        const userData = await response.json();
+        login(userData);
+      } else if (response.status === 401) {
+        logout();
+      }
+    } catch (error) {
+      console.error("Failed to refresh user data:", error);
+      logout();
+    }
+  };
+
+  // Vérification des rôles
+  const hasRole = (role: UserRole): boolean => {
+    return user?.role === role;
+  };
+
+  const contextValue: AuthContextType = {
+    user,
+    loading,
+    login,
+    logout,
+    isAuthenticated: !!user && validateToken(getToken()),
+    hasRole,
+    getToken,
+    refreshUserData,
+  };
+
+  return (
+    <AuthContext.Provider value={contextValue}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+export const useAuth = (): AuthContextType => {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error("useAuth must be used within an AuthProvider");
+  }
+  return context;
+};

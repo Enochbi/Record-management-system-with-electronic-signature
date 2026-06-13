@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Évite les comportements tactiles indésirables */
+canvas[class^="sigCanvas"] {
+  touch-action: none !important;
+  user-select: none !important;
+}
+
+/* Correction du curseur sur mobile */
+@media (pointer: coarse) {
+  canvas[class^="sigCanvas"] {
+    cursor: pointer !important;
+  }
+}

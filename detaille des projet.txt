@@ -1,0 +1,450 @@
+# Arrêt complet
+pm2 delete all
+
+# 2. Nettoyer les anciens processus
+pm2 cleardump
+
+# Démarrage propre
+pm2 start ecosystem.config.cjs
+
+# Sauvegarde de la configuration
+pm2 save
+
+# Pour Windows - configuration du démarrage automatique
+npm install pm2-windows-startup -g
+pm2-startup install
+
+
+----------------------------
+
+//"start:both": "concurrently \"npm run server\" \"npm run dev\" \"npm --prefix FEB run server\" \"npm --prefix FEB run dev\""
+
+1-je voudrais que une dois connecter à FDP/Dashboard.tsx, je puisse avoir un boutons qui va me redirigé vers 
+├── FEB/ son adresse (➜  Local:   http://localhost:5174/Dashboard.tsx)
+2-La connexion depuis FDP/Dashboard.tsx doit permettre au User de etre idenfier dans FEB/Dashboard.tsx plus besoin
+par le login du deuxième projet
+
+------------Structure
+
+FDP/
+│
+├── FEB/
+│   ├── .bolt/
+│   ├── server/
+│   │   ├── index.js
+│   │   └── index.ts
+│   ├── src/
+│   │   ├── api/
+│   │   │   └── index.ts
+│   │   │
+│   │   ├── components/
+│   │   │   ├── Dashboard.tsx
+│   │   │   ├── FDPDetail.tsx
+│   │   │   ├── FDPForm.tsx
+│   │   │   ├── Layout.tsx
+│   │   │   ├── Login.tsx
+│   │   │   ├── Register.tsx
+│   │   │   └── SignatureCanvas.tsx
+│   │   │
+│   │   ├── context/
+│   │   │   └── AuthContext.tsx
+│   │   │
+│   │   ├── types/
+│   │   │   └── index.ts
+│   │   │
+│   │   ├── App.tsx
+│   │   ├── index.css
+│   │   ├── main.tsx
+│   │   └── vite-env.d.ts
+│   │
+│   ├── codesql/
+│   │   └── code.sql
+│   │
+│   ├── .env
+│   ├── .gitignore
+│   ├── eslint.config.js
+│   ├── index.html
+│   ├── package.json
+│   ├── postcss.config.js
+│   ├── README.md
+│   ├── tailwind.config.js
+│   ├── tsconfig.app.json
+│   ├── tsconfig.json
+│   ├── tsconfig.node.json
+│   └── vite.config.ts
+│
+├── .bolt/
+├── server/
+│   ├── index.js
+│   └── index.ts
+├── src/
+│   ├── api/
+│   │   └── index.ts
+│   │
+│   ├── components/
+│   │   ├── Dashboard.tsx
+│   │   ├── FDPDetail.tsx
+│   │   ├── FDPForm.tsx
+│   │   ├── Layout.tsx
+│   │   ├── Login.tsx
+│   │   └── SignatureCanvas.tsx
+│   │
+│   ├── context/
+│   │   └── AuthContext.tsx
+│   │
+│   ├── types/
+│   │   └── index.ts
+│   │
+│   ├── App.tsx
+│   ├── index.css
+│   ├── main.tsx
+│   └── vite-env.d.ts
+│
+├── codesql/
+│   └── code.sql
+│
+├── .env
+├── .gitignore
+├── eslint.config.js
+├── index.html
+├── package.json
+├── postcss.config.js
+├── README.md
+├── tailwind.config.js
+├── tsconfig.app.json
+├── tsconfig.json
+├── tsconfig.node.json
+└── vite.config.ts
+
+
+--------------------------------------------
+FEB/
+│
+├── .bolt/
+├── server/
+│ ├── index.js
+│ └── index.ts
+├── src/
+│ ├── api/
+│ │ └── index.ts
+│ │
+│ ├── components/
+│ │ ├── Dashboard.tsx
+│ │ ├── FDPDetail.tsx
+│ │ ├── FDPForm.tsx
+│ │ ├── Layout.tsx
+│ │ ├── Login.tsx
+│ │ └── SignatureCanvas.tsx
+│ │ └── Register.tsx
+│ │
+│ ├── context/
+│ │ └── AuthContext.tsx
+│ │
+│ ├── types/
+│ │ └── index.ts
+│ │
+│ ├── App.tsx
+│ ├── index.css
+│ ├── main.tsx
+│ └── vite-env.d.ts
+│
+├── codesql/
+│ └── code.sql
+│
+├── .env
+├── .gitignore
+├── eslint.config.js
+├── index.html
+├── package.json
+├── postcss.config.js
+├── README.md
+├── tailwind.config.js
+├── tsconfig.app.json
+├── tsconfig.json
+├── tsconfig.node.json
+└── vite.config.ts
+
+
+--------------------------------
+FDP/
+│
+├── .bolt/
+├── server/
+│ ├── index.js
+│ └── index.ts
+├── src/
+│ ├── api/
+│ │ └── index.ts
+│ │
+│ ├── components/
+│ │ ├── Dashboard.tsx
+│ │ ├── FDPDetail.tsx
+│ │ ├── FDPForm.tsx
+│ │ ├── Layout.tsx
+│ │ ├── Login.tsx
+│ │ └── SignatureCanvas.tsx
+│ │
+│ ├── context/
+│ │ └── AuthContext.tsx
+│ │
+│ ├── types/
+│ │ └── index.ts
+│ │
+│ ├── App.tsx
+│ ├── index.css
+│ ├── main.tsx
+│ └── vite-env.d.ts
+│
+├── codesql/
+│ └── code.sql
+│
+├── .env
+├── .gitignore
+├── eslint.config.js
+├── index.html
+├── package.json
+├── postcss.config.js
+├── README.md
+├── tailwind.config.js
+├── tsconfig.app.json
+├── tsconfig.json
+├── tsconfig.node.json
+└── vite.config.ts
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+----------------------------------------------------------------------------------
+
+fiche1 : http://localhost:5173/dashboard n'arrive pas à charger mes donnée de BD
+
+Cahier de Charges – Fiche de Demande de Paiement (FDP)
+1. Objectif et Portée
+But :
+Créer une fiche de demande de paiement (FDP) qui sera créée en premier et validée via un workflow comportant 7 étapes (signataires).
+Impression :
+L’impression directe doit reproduire exactement la mise en page de la fiche de base en pdf joint, tenant sur une seule page A4.
+2. Identifiants Personnalisés et Liaison
+Numéro de FDP :
+Format : « [ordre] - [date au format DD/MM/YYYY] - FDP » (ex. « 01 - 28/2025 - FDP »).
+Ce numéro est généré automatiquement lors de la création.
+
+3. Informations et Contenu
+3.1 Informations Générales
+Date de création : Automatique ou saisie manuelle.
+Détails du demandeur :
+Nom, prénom, fonction, service, et coordonnées (email, téléphone).
+3.2 Description et Contexte
+Description de la demande de paiement :
+Un champ court résumant l’objet de la demande.
+Une zone de texte détaillée précisant le contexte et la nature du paiement.
+3.3 Informations Financières
+Montant à payer :
+Champ numérique (format, devise, séparateur décimal).
+Note : Ce champ est renseigné par le signataire Opérations lors de la phase Prospection.
+Mode de paiement :
+Sélection via liste déroulante ou boutons radio (virement, chèque, espèces, etc.).
+Informations complémentaires :
+Fournisseur (nom, adresse, numéro de facture), date d’échéance, etc.
+4. Saisie, Sauvegarde et Contrôles
+Contrôle des champs obligatoires avec messages d’erreur.
+Sauvegarde en brouillon et auto-save (optionnelle) pour éviter la perte de données.
+Modification :
+Seul le demandeur peut créer, éditer, modifier ou supprimer la fiche.
+5. Workflow de Validation et Signature Électronique
+5.1 Signature du Demandeur
+Zone de signature interactive :
+Permet de dessiner via Canvas HTML5 ou d’importer une image (PNG/JPG).
+Seul le demandeur a droit à la signature initiale et à la modification.
+5.2 Workflow – 7 Niveaux de Validation
+Demandeur
+Signature initiale lors de la création.
+Prospection
+Opérations : Signature obligatoire et saisie du montant.
+Fournisseur : Signature facultative (si applicable).
+Chef de service / Responsable hiérarchique
+Validation par le responsable direct.
+Responsable financier / Trésorerie
+Vérification de la cohérence budgétaire.
+Responsable comptable / Contrôle interne
+Contrôle de la conformité et des aspects comptables.
+Directeur Général (DG)
+Validation finale avant exécution.
+La Caisse
+Signature finale confirmant la disponibilité et l’exécution du paiement.
+Les signataires autres que le demandeur disposent d’une zone de signature interactive ou d’une option d’import d’image. Ils ne peuvent que signer ou rejeter (avec commentaires) sans modifier le contenu de la fiche. En cas de rejet, la fiche retourne en modification, accessible uniquement par le demandeur.
+
+6. Historique et Consultation
+Historique des FDP :
+Affichage d’un tableau listant le numéro de fiche, la date de création, le nom du demandeur et un résumé de la description.
+Consultation détaillée :
+Possibilité de cliquer sur une fiche pour recharger l’ensemble des données et visualiser le workflow complet des signatures.
+7. Actions et Navigation
+Boutons principaux :
+Nouveau : Réinitialiser le formulaire (accessible uniquement par le demandeur).
+Enregistrer : Sauvegarder ou mettre à jour la fiche (seul le demandeur a ce droit).
+Imprimer : Lancer l’impression directe sur une seule page A4, avec un rendu conforme à l’image de la fiche de base.
+
+8. Sécurité et Accès
+Authentification :
+Système de connexion sécurisé (login/mot de passe haché).
+Gestion des rôles :
+Seul le demandeur peut modifier la fiche.
+Les autres (signataires, DG, caisse) ne disposent que du droit de signer ou de rejeter.
+
+
+--Implemete tout le reste des fonctionnalité demandé: je veux quelque chose de très professionnel
+--Implement le menu, exactement pareil que sur l'image joint
+-- supprimme tout ce que concerne la Fiche d’Expression de Besoin (FEB): elle n'est pas
+implementer ici
+
+-Si le DG signe la fiche est consideré comme validé dans son ensemble: sa signature est reporté par 
+interim automatiquement chez tous les autres signataire n'ayant pas encore validé
+
+-Seule le DG peut remplir la case: "montant validé"
+--A ne pas oublié un bouton de suppression de fiche pour le demandeur 
+
+-Le site doit s'adapter à tout type d'appareil (pc, telephones...): je veux quelque chose de très professionnel
+
+§§§ IMPLEMENTE TOUT LE PROJET DE FAçONS DEFINITIVE POUR QUE LE SITE FONCTION AVEC MA BASE DE DONNE
+# Server Configuration
+PORT=5000
+JWT_SECRET=vipnet-fdp-secret-key
+
+# Database Configuration
+DB_USER=postgres
+DB_PASSWORD=7284
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=Vipnet_fiche
+
+
+
+FAIRE JUSTE UN UPDATE DU PROJET EN FONCTION DES NOUVELLE INSTRUCTION, au lieu de reprendre tous les codes tu peux juste faire des modification pour correspondre au nouveau projet demandé:
+----
+
+fiche2: utilise la structure de projet existant pour créer ce projet de la meme manière
+
+Cahier de Charges – Fiche d’Expression de Besoin (FEB)
+1. Objectif et Portée
+But :
+Créer une fiche d’expression de besoin qui détaille le besoin exprimé par le demandeur
+Impression :
+L’impression directe doit reproduire exactement le modèle de la fiche de base en image joint et sur une seule page A4.
+2. Identifiants Personnalisés et Liaison
+Numéro de FEB :
+Format : « [ID] - [date au format DD/MM/YYYY] - FEB » (ex. « 1 - 28/2025 - FEB »). ou le "1" correspond à l'id de l'enregistrement dans la BD
+Prevoit un champ FDP [ordre] - [date au format DD/MM/YYYY] - FDP semblabe à a FEB mais à remplir manuellement et à enregistré a coté de la FEB
+
+Génération automatique lors de la création.
+3. Informations et Contenu
+3.1 Informations Générales
+Date de création : Automatique ou saisie manuelle.
+Numéro de FEB automatique
+Numéro de FEB manuel
+
+Authentification+Gestion des rôles :Système de connexion sécurisé (login/mot de passe haché).
+Seul le demandeur peut faire "nouveau, 
+Seul le demandeur peut modifier ou supprimer(la fiche si le dg n'a pas validé).
+Le signataire "Operations" peut aussi modifier le montant
+Les autres signataires ne disposent que du droit de signer ou de rejeter
+Le fournisseur est un externe donc sa signature est optionnel et n'est pas prise en compte dans le statue final validé de la fiché
+
+Description complète :
+Zone de texte enrichie pour détailler le contexte, la justification et les enjeux.
+
+3.3 Informations Financières
+Montant à payer :
+Champ numérique (format, devise, séparateur décimal).
+
+4. Saisie, Sauvegarde et Contrôles
+Contrôle des champs obligatoires avec messages d’erreur.
+Sauvegarde en brouillon et auto-save (optionnelle).
+
+5. Workflow de Validation et Signature Électronique
+5.1 Signature du Demandeur
+Zone de signature interactive :
+Utilisation d’un Canvas HTML5.
+
+5.2 Ordre de Validation – 7 Signataires
+Demandeur – Signature initiale lors de la création de la FEB.
+Prospection
+Opérations : Signature obligatoire.
+Fournisseur : Signature facultative (si applicable).
+Responsable Technique – Validation des aspects techniques du besoin.
+Responsable Financier – Vérification de la cohérence budgétaire.
+Contrôle Interne – Vérification de la conformité et de la qualité.
+Directeur Général (DG) – Signature finale validant la fiche.
+
+6. Historique et Consultation
+Historique des FDP :
+Affichage d’un tableau listant le numéro de fiche FEB,Numero FDP, la date de création, le nom du demandeur, le montant, 
+un résumé de la description, le statue(en cours, completé), un bouton "voir"
+
+Consultation détaillée dans "voir" :
+Possibilité de cliquer sur une fiche pour recharger l’ensemble des données et visualiser le workflow complet des signatures.
+
+7. Actions et Navigation
+Boutons principaux :
+Nouveau : Réinitialiser le formulaire (accessible uniquement par le demandeur).
+Enregistrer : Sauvegarder ou mettre à jour la fiche (seul le demandeur a ce droit).
+Imprimer : Lancer l’impression directe sur une seule page A4, avec un rendu conforme à l’image de la fiche de base.
+
+-Pour l'impression et le formulaire de remplissage, Nous devons respecter la structure exacte de la fiche image que j'ai joint
+-Dashboard.tsx sera mis en image joint
+
+-Si le DG signe la fiche est consideré comme validé dans son ensemble: sa signature est reporté en P/O chez tous les autres signataire(n'ayant pas encore validé) sauf chez le fornisseur dont la signature n'est pas obligatoire
+NB: le fornissueur est un externe donc sa signature optionnel, sa signature ne compte pas dans la validation,
+
+-Le site doit s'adapter à tout type d'appareil: je veux quelque chose de très professionnel
+
+-Le site doit s'adapter à tout type d'appareil (pc, telephones...): je veux quelque chose de très professionnel
+-La zone de signature avec la souris ou le telephone : doit etre facile et très professionnel...
+-Le champ service doit etre une liste deroulante a selectionner....
+
+--Implemete tout: je veux quelque chose de très professionnel
+--je ne veux pas de supabase j'ai dejà PostgreSQL en local sur ma machine windows10
+§§§ IMPLEMENTE TOUT LE PROJET DE FAçONS DEFINITIVE POUR QUE LE SITE FONCTION AVEC MA BASE DE DONNE avec la possibilité de créer un compte avec tous les infos important
+# Server Configuration
+PORT=5000
+JWT_SECRET=vipnet-feb-secret-key
+
+# Database Configuration
+DB_USER=postgres
+DB_PASSWORD=7284
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=Vipnet_fiche
+
+---
+\c Vipnet_fiche; possibilité de créer un compte si inexistant
+
+-- Création de la table users
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  username VARCHAR(50) UNIQUE NOT NULL,
+  password VARCHAR(255) NOT NULL,
+  email VARCHAR(255) UNIQUE NOT NULL,
+  full_name VARCHAR(100) NOT NULL,
+  role VARCHAR(50) NOT NULL,
+  position VARCHAR(100) NOT NULL,
+  department VARCHAR(100) NOT NULL,
+  phone_number VARCHAR(20),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Création de la table fdps
+CREATE TABLE IF NOT EXISTS febs (
