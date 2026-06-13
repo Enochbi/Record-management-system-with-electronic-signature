@@ -1,4 +1,3 @@
-markdown
 # VIPNET Portal – Unified Management System
 
 **VIPNET Portal** is a professional digital platform that integrates two core management systems for organizations:  
@@ -106,8 +105,8 @@ Both systems are contained in the same repository. Follow these steps to set up 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/Enochbi/vipnet-portal.git
-cd vipnet-portal
+git clone https://github.com/Enochbi/Record-management-system-with-electronic-signature.git
+cd Record-management-system-with-electronic-signature
 2. Install dependencies
 bash
 npm install
@@ -118,10 +117,10 @@ sql
 CREATE DATABASE vipnet_portal;
 CREATE USER portal_user WITH PASSWORD 'your_password';
 GRANT ALL PRIVILEGES ON DATABASE vipnet_portal TO portal_user;
-Run the SQL script(s) located in codesql/ or sql/ folders:
+Run the SQL script(s) located in codesql/ or supabase/migrations/ folders:
 
 bash
-psql -U portal_user -d vipnet_portal -f codesql/code.sql
+psql -U portal_user -d vipnet_portal -f supabase/migrations/20250306012958_golden_brook.sql
 The script creates all necessary tables for both FDP and FGM.
 
 4. Environment variables
@@ -155,9 +154,8 @@ Production mode:
 bash
 npm run build          # Builds the frontend
 node server/index.js   # Starts the backend
-
 The same backend serves both systems via different API endpoints (/api/fdp/* and /api/fgm/*).
-```
+
 📜 Available Scripts
 Command	Description
 npm run dev	Starts frontend (Vite) and backend concurrently
@@ -250,6 +248,13 @@ Push to the branch (git push origin feature/amazing-feature)
 
 Open a Pull Request
 
+📞 Support
+For questions or issues:
+
+Email: support@vipnet.com
+
+GitHub Issues: https://github.com/Enochbi/Record-management-system-with-electronic-signature/issues
+
 🔄 Changelog
 v1.0.0 (2026-06-13)
 Initial release with both FDP and FGM systems
@@ -263,6 +268,3 @@ Digital signatures for material management
 Responsive interface and half‑A4 printing
 
 Developed with ❤️ for VIPNET – Secure digital management for payment requests and material tracking
-
-#   R e c o r d - m a n a g e m e n t - s y s t e m - w i t h - e l e c t r o n i c - s i g n a t u r e  
- 
